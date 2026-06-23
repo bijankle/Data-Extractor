@@ -336,8 +336,12 @@
   .ctx-btn .ctx-n { opacity: .65; }
   .ctx-loc { font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 7px; }
   .ctx-sentence { font-size: 13px; color: var(--text-body); line-height: 1.5; }
-  .ctx-nav { display: flex; gap: 6px; margin-top: 10px; }
-  .ctx-nav .btn { width: 32px; padding: 0; justify-content: center; font-size: 16px; }
+  /* nav pinned at top; fixed callout size so it never moves while clicking through */
+  .context-callout.fixed { width: 380px; max-width: 380px; }
+  .context-callout .ctx-nav { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; padding-bottom: 9px; border-bottom: 1px solid var(--hairline); }
+  .context-callout .ctx-nav .btn { width: 34px; padding: 0; justify-content: center; font-size: 17px; }
+  .ctx-count { font-size: 12.5px; font-weight: 700; color: var(--text-body); }
+  .context-callout.fixed .ctx-content { height: 130px; overflow: auto; }
 
   /* ---- Two pill rows (general / engineering) --------------------------- */
   .pill-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
@@ -907,10 +911,10 @@ async function parsePdf(file, beat = () => {}) {
     // --- tables: reconstruct from text geometry (positions) ---
     try {
       const viewport = page.getViewport({ scale: 1 });
-      extractPdfTables(content, viewport).forEach((rows) => {
+      extractPdfTables(content, viewport).forEach((tbl) => {
         // Short, friendly name if the table has an obvious caption; else "Table N".
         const n = ++tableCount;
-        tables.push({ name: deriveTableName(rows) || `Table ${n}`, rows, page: p });
+        tables.push({ name: tbl.name || `Table ${n}`, rows: tbl.rows, page: p });
       });
     } catch (_) { /* table reconstruction is best-effort */ }
 
@@ -957,71 +961,6 @@ async function parsePdf(file, beat = () => {}) {
   but reliably catches clean grids like quotes/invoices.
 */
 const _isNumericCell = (s) => /^[-+(]?\$?\s?\d[\d,]*\.?\d*\)?%?$/.test(s.trim());
-function extractPdfTables(content, viewport) {
-  const items = content.items
-    .filter(i => i.str.trim())
-    .map(i => ({ s: i.str.trim(), x: Math.round(i.transform[4]), y: Math.round(viewport.height - i.transform[5]) }));
-  if (items.length < 6) return [];
-
-  // 1. rows by Y (3px tolerance)
-  items.sort((a, b) => a.y - b.y || a.x - b.x);
-  const rows = [];
-  let cur = null;
-  for (const it of items) {
-    if (!cur || Math.abs(it.y - cur.y) > 3) { cur = { y: it.y, cells: [it] }; rows.push(cur); }
-    else cur.cells.push(it);
-  }
-
-  // 2. column anchors: cluster x-starts (22px) appearing in >=3 rows
-  const xs = [];
-  for (const r of rows) if (r.cells.length >= 2) for (const c of r.cells) xs.push(c.x);
-  xs.sort((a, b) => a - b);
-  const clusters = [];
-  for (const x of xs) {
-    const last = clusters[clusters.length - 1];
-    if (last && x - last.sum / last.n <= 26) { last.sum += x; last.n++; }
-    else clusters.push({ sum: x, n: 1 });
-  }
-  const cols = clusters.filter(c => c.n >= 3).map(c => Math.round(c.sum / c.n)).sort((a, b) => a - b);
-  if (cols.length < 2) return [];
-
-  // 3. map each row into columns (nearest anchor wins)
-  const toCols = (r) => {
-    const out = new Array(cols.length).fill('');
-    for (const c of r.cells) {
-      let bi = 0, bd = Infinity;
-      cols.forEach((cx, i) => { const d = Math.abs(c.x - cx); if (d < bd) { bd = d; bi = i; } });
-      out[bi] = out[bi] ? out[bi] + ' ' + c.s : c.s;
-    }
-    return out;
-  };
-  const mapped = rows.map(r => ({ y: r.y, cells: toCols(r), filled: 0 }));
-  mapped.forEach(m => m.filled = m.cells.filter(Boolean).length);
-
-  // 4. group consecutive multi-column rows (Y gap <= 20px) into blocks
-  const blocks = [];
-  let b = null;
-  for (const m of mapped) {
-    if (m.filled >= 2) { if (b && m.y - b.lastY <= 20) { b.rows.push(m.cells); b.lastY = m.y; } else { b = { rows: [m.cells], lastY: m.y }; blocks.push(b); } }
-    else b = null;
-  }
-
-  // 5. keep blocks with >=3 rows and a mostly-numeric column; trim prose that
-  //    leaked in above/below the grid; prune sparse cols.
-  const tables = [];
-  for (const bl of blocks) {
-    const core = trimTableRows(bl.rows);
-    if (core.length < 3) continue;
-    let numeric = false;
-    for (let ci = 0; ci < cols.length; ci++) {
-      const vals = core.map(r => r[ci]).filter(Boolean);
-      if (vals.length >= 3 && vals.filter(_isNumericCell).length / vals.length >= 0.4) { numeric = true; break; }
-    }
-    if (!numeric) continue;
-    tables.push(pruneSparseColumns(core));
-  }
-  return tables;
-}
 
 // A "prose" row has a cell that reads like a sentence (many words, mostly
 // lowercase) — a wrapped paragraph that flowed through the grid. Table cells are
@@ -1034,37 +973,107 @@ function isProseRow(cells) {
   }
   return false;
 }
-// A caption row holds the table's title ("Table 3-1  …") — already shown as the
-// table name, so it shouldn't sit inside the grid.
+// A caption row holds the table's title ("Table 3-1 …") — already the table name.
 function isCaptionRow(cells) {
   return /\bTable\s*\d+\s*[-–]\s*\d+/i.test(cells.join(' '));
 }
-// Drop prose + caption rows anywhere in the block. If nothing real is left, it
-// wasn't a table (e.g. a numbered paragraph), so return [] to reject it.
-function trimTableRows(rows) {
-  return rows.filter(r => !isProseRow(r) && !isCaptionRow(r));
+
+// Gap-based column detection: a real column boundary is a vertical band of
+// whitespace ("river") that stays empty across most rows. Far more robust than
+// guessing from text start positions — it keeps "2.5 Mtpa (Current)" as one cell
+// and only splits where there's a genuine gap. `rowItems` is an array of rows,
+// each an array of { x, right, s } text fragments.
+function gapColumns(rowItems) {
+  let minX = Infinity, maxX = -Infinity;
+  for (const r of rowItems) for (const it of r) { minX = Math.min(minX, it.x); maxX = Math.max(maxX, it.right); }
+  if (!isFinite(minX)) return null;
+  const BIN = 2, nb = Math.ceil((maxX - minX) / BIN) + 1, cov = new Float64Array(nb), nr = rowItems.length;
+  for (const r of rowItems) {
+    const mk = new Uint8Array(nb);
+    for (const it of r) { const a = Math.max(0, Math.floor((it.x - minX) / BIN)), b = Math.ceil((it.right - minX) / BIN); for (let i = a; i < b && i < nb; i++) mk[i] = 1; }
+    for (let i = 0; i < nb; i++) cov[i] += mk[i];
+  }
+  const thr = Math.max(1, nr * 0.12), minGap = Math.ceil(8 / BIN), seps = [];
+  let i = 0;
+  while (i < nb) {
+    if (cov[i] < thr) { let j = i; while (j < nb && cov[j] < thr) j++; if (j - i >= minGap) seps.push(minX + ((i + j) / 2) * BIN); i = j; }
+    else i++;
+  }
+  const bounds = [minX - 1, ...seps, maxX + 1], ranges = [];
+  for (let k = 0; k < bounds.length - 1; k++) ranges.push([bounds[k], bounds[k + 1]]);
+  return ranges;
+}
+function assignToColumns(items, ranges) {
+  const out = ranges.map(() => []);
+  for (const it of items) { let ci = ranges.findIndex(([a, b]) => it.x >= a && it.x < b); if (ci < 0) ci = ranges.length - 1; out[ci].push(it); }
+  return out.map(a => a.sort((p, q) => p.x - q.x).map(t => t.s).join(' ').trim());
 }
 
-// Drop columns that are filled in <20% of rows (e.g. a centered header sitting
-// between data columns), merging any stray text into the nearest kept column.
-function pruneSparseColumns(rows) {
-  const nCols = Math.max(...rows.map(r => r.length));
-  const keep = [];
-  for (let c = 0; c < nCols; c++) {
-    const filled = rows.filter(r => r[c]).length;
-    if (filled / rows.length >= 0.34) keep.push(c);
+/*
+  Reconstruct tables from a PDF page's text geometry. Hybrid approach:
+    1. Group text into rows by Y.
+    2. Use clustered x-start "anchors" only to decide which rows are table-like
+       (>= 2 columns) and group those into vertical blocks.
+    3. Drop prose + caption rows from each block.
+    4. Detect real columns from the whitespace gaps in the block's own rows.
+    5. Keep blocks of >= 3 rows that have a mostly-numeric column.
+  Borderless tables are inherently imperfect, but this keeps cells intact and
+  avoids the dead-column/split-cell mess of pure anchor mapping.
+*/
+function extractPdfTables(content, viewport) {
+  const items = content.items
+    .filter(i => i.str.trim())
+    .map(i => ({ s: i.str.trim(), x: i.transform[4], right: i.transform[4] + (i.width || 0), y: Math.round(viewport.height - i.transform[5]) }));
+  if (items.length < 6) return [];
+
+  // rows by Y (3px tolerance)
+  items.sort((a, b) => a.y - b.y || a.x - b.x);
+  const rows = [];
+  let cur = null;
+  for (const it of items) {
+    if (!cur || Math.abs(it.y - cur.y) > 3) { cur = { y: it.y, its: [it] }; rows.push(cur); }
+    else cur.its.push(it);
   }
-  if (keep.length === nCols || keep.length === 0) return rows;
-  const nearestKept = (c) => keep.reduce((best, k) => Math.abs(k - c) < Math.abs(best - c) ? k : best, keep[0]);
-  return rows.map(r => {
-    const merged = {};
-    r.forEach((val, c) => {
-      if (!val) return;
-      const target = keep.includes(c) ? c : nearestKept(c);
-      merged[target] = merged[target] ? merged[target] + ' ' + val : val;
-    });
-    return keep.map(c => merged[c] || '');
-  });
+
+  // x-anchors (just to judge "is this a table row") — cluster x-starts seen >= 3 rows
+  const xs = [];
+  for (const r of rows) if (r.its.length >= 2) for (const it of r.its) xs.push(it.x);
+  xs.sort((a, b) => a - b);
+  const clusters = [];
+  for (const x of xs) { const last = clusters[clusters.length - 1]; if (last && x - last.sum / last.n <= 26) { last.sum += x; last.n++; } else clusters.push({ sum: x, n: 1 }); }
+  const anchors = clusters.filter(c => c.n >= 3).map(c => Math.round(c.sum / c.n));
+  const filledCount = (r) => {
+    const hit = new Set();
+    for (const it of r.its) { let bi = 0, bd = Infinity; anchors.forEach((cx, i) => { const d = Math.abs(it.x - cx); if (d < bd) { bd = d; bi = i; } }); if (bd < 26) hit.add(bi); }
+    return hit.size;
+  };
+
+  // group consecutive table rows (>= 2 anchor columns), Y-gap <= 22
+  const blocks = [];
+  let b = null;
+  for (const r of rows) {
+    if (filledCount(r) >= 2) { if (b && r.y - b.lastY <= 22) { b.rows.push(r); b.lastY = r.y; } else { b = { rows: [r], lastY: r.y }; blocks.push(b); } }
+    else b = null;
+  }
+
+  const tables = [];
+  for (const bl of blocks) {
+    const core = bl.rows.filter(r => { const cells = r.its.map(t => t.s); return !isProseRow(cells) && !isCaptionRow(cells); });
+    if (core.length < 3) continue;
+    const ranges = gapColumns(core.map(r => r.its));
+    if (!ranges || ranges.length < 2) continue;
+    const grid = core.map(r => assignToColumns(r.its, ranges));
+    let numeric = false;
+    for (let ci = 0; ci < ranges.length; ci++) {
+      const vals = grid.map(r => r[ci]).filter(Boolean);
+      if (vals.length >= 3 && vals.filter(_isNumericCell).length / vals.length >= 0.4) { numeric = true; break; }
+    }
+    if (!numeric) continue;
+    // Friendly name from the block's raw rows (which still include the caption).
+    const name = deriveTableName(bl.rows.slice(0, 6).map(r => r.its.map(t => t.s)));
+    tables.push({ rows: grid, name });
+  }
+  return tables;
 }
 
 // Best-effort short, friendly table name. Engineering docs caption tables as
@@ -1689,34 +1698,43 @@ function closeCallout() {
 function showContext(anchor, item) {
   closeCallout();
   const matcher = buildMatcher(item.value);            // highlight the value in the sentence
-  const co = el('div', { className: 'callout' });
+  const multi = item.indices.length > 1;
+  const co = el('div', { className: 'callout context-callout' + (multi ? ' fixed' : '') });
   co.addEventListener('click', (e) => e.stopPropagation());
-  co.append(el('div', { className: 'callout-head', textContent: item.value }));
+
   const locLine = el('div', { className: 'ctx-loc' });
   const sentence = el('div', { className: 'ctx-sentence' });
-  co.append(locLine, sentence);
 
   let cur = 0;
   const render = () => {
     const idx = item.indices[cur];
-    locLine.textContent = locate(idx) + (item.indices.length > 1 ? '   ·   ' + (cur + 1) + ' / ' + item.indices.length : '');
+    locLine.textContent = locate(idx);
     sentence.textContent = '';
     appendHighlighted(sentence, contextAround(idx, item.value.length), matcher);
   };
 
-  if (item.indices.length > 1) {
+  // Nav bar pinned at the TOP so the arrows don't move while you click through.
+  if (multi) {
     const nav = el('div', { className: 'ctx-nav' });
     const prev = el('button', { className: 'btn btn-secondary sm', textContent: '‹', title: 'Previous occurrence' });
     const next = el('button', { className: 'btn btn-secondary sm', textContent: '›', title: 'Next occurrence' });
-    prev.onclick = (e) => { e.stopPropagation(); cur = (cur - 1 + item.indices.length) % item.indices.length; render(); };
-    next.onclick = (e) => { e.stopPropagation(); cur = (cur + 1) % item.indices.length; render(); };
-    nav.append(prev, next);
+    const counter = el('span', { className: 'ctx-count' });
+    const upd = () => counter.textContent = (cur + 1) + ' / ' + item.indices.length;
+    prev.onclick = (e) => { e.stopPropagation(); cur = (cur - 1 + item.indices.length) % item.indices.length; render(); upd(); };
+    next.onclick = (e) => { e.stopPropagation(); cur = (cur + 1) % item.indices.length; render(); upd(); };
+    nav.append(prev, counter, next);
     co.append(nav);
+    upd();
   }
+  co.append(el('div', { className: 'callout-head', textContent: item.value }));
+  const content = el('div', { className: 'ctx-content' });
+  content.append(locLine, sentence);
+  co.append(content);
   render();
   document.body.append(co);
 
-  // Position below the button, kept inside the viewport horizontally.
+  // Position below the button, kept inside the viewport horizontally. The fixed
+  // size (set in CSS) means it never reflows as you step through occurrences.
   const a = anchor.getBoundingClientRect();
   const maxLeft = window.scrollX + document.documentElement.clientWidth - co.offsetWidth - 12;
   co.style.top = (window.scrollY + a.bottom + 6) + 'px';
