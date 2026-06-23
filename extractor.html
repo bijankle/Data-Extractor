@@ -470,6 +470,8 @@ const LIBS = {
   jszip:   'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
 };
 
+const LIB_TIMEOUT_MS = 25000; // a CDN script that never loads (offline / blocked) must not hang forever
+
 const _loaded = {};
 function loadScript(url) {
   if (_loaded[url]) return _loaded[url];
@@ -477,8 +479,15 @@ function loadScript(url) {
     const s = document.createElement('script');
     s.src = url;
     s.async = true;
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error('Could not load library from CDN. Check your connection.'));
+    // Watchdog: a blocked/offline CDN often never fires onerror, so we bail out ourselves.
+    const timer = setTimeout(() => {
+      fail(new Error('Timed out loading a library from the CDN (' + url.split('/').pop() +
+        '). You may be offline or the CDN is blocked — this tool needs internet on first use of PDF/DOCX/XLSX/CSV files.'));
+    }, LIB_TIMEOUT_MS);
+    const done = () => { clearTimeout(timer); };
+    const fail = (err) => { done(); delete _loaded[url]; s.remove(); reject(err); }; // allow a later retry
+    s.onload = () => { done(); resolve(); };
+    s.onerror = () => fail(new Error('Could not load a library from the CDN (' + url.split('/').pop() + '). Check your connection.'));
     document.head.appendChild(s);
   });
   return _loaded[url];
@@ -503,12 +512,45 @@ const el = (tag, props = {}, ...kids) => {
 const microYield = () => new Promise(r => setTimeout(r, 0)); // hand control back to the UI
 const fmtBytes = (b) => b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : (b / 1048576).toFixed(1) + ' MB';
 
-function toast(msg, kind = 'ok', title = '') {
-  const t = el('div', { className: 'toast ' + kind });
+/*
+  No-progress watchdog. Runs `task`, handing it a `beat()` function. Every call
+  to beat() means "I'm still making progress" and resets the timer. If no beat
+  (and no completion) happens within `ms`, the task is rejected so the UI can
+  surface an error instead of spinning forever. Long-but-progressing work (e.g.
+  a big multi-page PDF) keeps beating and is never killed; a truly stuck parse
+  (hung CDN load, corrupt file) trips the watchdog.
+*/
+const STALL_TIMEOUT_MS = 30000;
+function withWatchdog(label, task, ms = STALL_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    let timer, settled = false;
+    const stop = () => { settled = true; clearTimeout(timer); };
+    const beat = () => {
+      if (settled) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(label + ' stalled — no progress for ' + Math.round(ms / 1000) +
+          's. The file may be too large or corrupt, or a CDN library is blocked. Aborting.'));
+      }, ms);
+    };
+    beat(); // arm
+    Promise.resolve(task(beat)).then(
+      (v) => { if (!settled) { stop(); resolve(v); } },
+      (e) => { if (!settled) { stop(); reject(e); } }
+    );
+  });
+}
+
+function toast(msg, kind = 'ok', title = '', duration = 4200) {
+  const t = el('div', { className: 'toast ' + kind, title: 'Click to dismiss' });
   if (title) t.append(el('span', { className: 't-title', textContent: title }));
   t.append(document.createTextNode(msg));
+  const dismiss = () => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(() => t.remove(), 300); };
+  t.addEventListener('click', dismiss);
   $('#toasts').append(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(() => t.remove(), 300); }, 4200);
+  setTimeout(dismiss, duration);
 }
 
 /* ============================================================================
@@ -609,16 +651,19 @@ async function parseJson(file) {
 }
 
 /* --- PDF via PDF.js: text + embedded images ---------------------------- */
-async function parsePdf(file) {
+async function parsePdf(file, beat = () => {}) {
   await ensurePdfjs();
+  beat();
   const data = await readAsArrayBuffer(file);
   const pdf = await window.pdfjsLib.getDocument({ data }).promise;
+  beat();
   let text = '';
   const images = [];
   const seen = new Set();
 
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
+    beat(); // each page is progress — resets the no-progress watchdog
 
     // --- text layer ---
     const content = await page.getTextContent();
@@ -719,15 +764,15 @@ async function parseXlsx(file) {
   return { sieveText: text, displayText: text.trim(), images: [], tables };
 }
 
-// Route a single file to its parser.
-async function parseFile(file) {
+// Route a single file to its parser. `beat` is the watchdog heartbeat.
+async function parseFile(file, beat = () => {}) {
   const fmt = detectFormat(file);
   switch (fmt) {
     case 'txt': case 'log': case 'md': case 'xml': case 'text': return parsePlain(file);
     case 'html': return parseHtml(file);
     case 'csv':  return parseCsv(file);
     case 'json': return parseJson(file);
-    case 'pdf':  return parsePdf(file);
+    case 'pdf':  return parsePdf(file, beat);
     case 'docx': return parseDocx(file);
     case 'xlsx': return parseXlsx(file);
     case 'doc-legacy':
@@ -1122,12 +1167,15 @@ async function ingestFiles(fileList) {
     renderChips();
 
     try {
-      const norm = await parseFile(file);
+      // The watchdog aborts (and alerts) if parsing makes no progress — e.g. a
+      // hung CDN load or a corrupt file that would otherwise spin forever.
+      const norm = await withWatchdog('Parsing “' + file.name + '”', (beat) => parseFile(file, beat));
       Object.assign(src, norm, { status: 'ok' });
       toast(`Parsed “${file.name}”.`, 'ok');
     } catch (e) {
       src.status = 'err';
-      toast(e.message, 'error', file.name);
+      src.error = e.message;
+      toast(e.message, 'error', file.name, 9000); // errors linger so they can't be missed
     }
     renderChips();
     await recompute();
@@ -1137,11 +1185,12 @@ async function ingestFiles(fileList) {
 function renderChips() {
   const wrap = $('#chips'); wrap.innerHTML = '';
   for (const src of state.sources) {
-    const chip = el('div', { className: 'chip' });
+    const chip = el('div', { className: 'chip', title: src.status === 'err' && src.error ? src.error : '' });
     const dot = el('span', { className: 'chip-dot ' + (src.status === 'ok' ? 'ok' : src.status === 'err' ? 'err' : 'busy') });
     chip.append(dot);
     chip.append(el('span', { className: 'name', textContent: src.name }));
     if (src.status === 'busy') chip.append(el('span', { className: 'spin' }));
+    else if (src.status === 'err') chip.append(el('span', { className: 'meta', style: 'color:var(--danger);font-weight:600;', textContent: 'failed' }));
     else if (src.size != null) chip.append(el('span', { className: 'meta', textContent: fmtBytes(src.size) }));
     const x = el('button', { className: 'chip-x', textContent: '×', title: 'Remove',
       onclick: () => {
