@@ -356,6 +356,8 @@
   .kv-head { display: flex; gap: 14px; padding: 7px 14px; background: var(--n2); border-bottom: 1px solid var(--border); }
   .kv-head span { font-size: 11px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; color: var(--muted); }
   .kv-head .h-val { flex: 1; }
+  .kv-head .sortable { cursor: pointer; user-select: none; }
+  .kv-head .sortable:hover { color: var(--text-body); }
 
   /* Parameters lens — sortable value/unit table */
   table.ptable { border-collapse: collapse; width: 100%; font-size: 13px; border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; }
@@ -1135,6 +1137,7 @@ const state = {
   tableSel: 0,          // selected table index in the Tables lens
   filter: '',           // global filter text (applies to every lens)
   paramSort: { col: null, dir: 1 }, // Parameters lens sort: col 'value'|'unit'|'loc', dir 1 asc / -1 desc
+  listSort: {},         // per-list-lens sort, keyed by category: { col:'value'|'loc', dir }
 };
 
 // Definition of every category lens.
@@ -1425,7 +1428,7 @@ function renderPanel() {
 
   // ----- body by type ----- (list lenses get filtered to matching items)
   if (cat.key === 'parameters')   renderParameters(body, applyFilterList(state.display[cat.key]));
-  else if (cat.type === 'list')   renderList(body, applyFilterList(state.display[cat.key]));
+  else if (cat.type === 'list')   renderList(body, applyFilterList(state.display[cat.key]), cat.key);
   else if (cat.type === 'raw')    renderRaw(body, state.results.rawText);
   else if (cat.type === 'images') renderGallery(body, state.results.images);
   else if (cat.type === 'tables') renderTables(body, state.results.tables);
@@ -1488,24 +1491,46 @@ function buildOutputControls(cat) {
 }
 
 // Two-column table: the extracted value, and where it was found in the document
-// (page + position %). Repeats collapsed by dedupe show a "(+N more)" note.
-function renderList(body, items) {
+// (page + position %). Both headers are clickable to sort (Value A–Z, Found at by
+// document position) — each lens remembers its own sort. Repeats collapsed by
+// dedupe show a "(+N more)" note.
+function renderList(body, items, key) {
   if (!items.length) { body.append(el('div', { className: 'empty', textContent: 'No matches.' })); return; }
-  const kv = el('div', { className: 'kv' });
-  const head = el('div', { className: 'kv-head' });
-  head.append(el('span', { className: 'h-val', textContent: 'Value' }));
-  head.append(el('span', { textContent: 'Found at' }));
-  kv.append(head);
   const filter = getFilter();
-  items.forEach((item) => {
-    const row = el('div', { className: 'kv-row' });
-    const val = el('span', { className: 'kv-val' });
-    appendHighlighted(val, item.value, filter);
-    row.append(val);
-    row.append(locCell(item, 'kv-loc'));
-    kv.append(row);
-  });
-  body.append(kv);
+  const sortState = state.listSort[key] || (state.listSort[key] = { col: null, dir: 1 });
+  const host = el('div'); body.append(host);
+
+  const paint = () => {
+    host.innerHTML = '';
+    const rows = items.slice();
+    if (sortState.col === 'value')    rows.sort((a, b) => a.value.localeCompare(b.value, undefined, { numeric: true, sensitivity: 'base' }) * sortState.dir);
+    else if (sortState.col === 'loc') rows.sort((a, b) => (a.index - b.index) * sortState.dir);
+    // else: keep the order applyListOptions produced
+
+    const arrow = (c) => sortState.col === c ? (sortState.dir > 0 ? ' ▲' : ' ▼') : '';
+    const kv = el('div', { className: 'kv' });
+    const head = el('div', { className: 'kv-head' });
+    const hVal = el('span', { className: 'h-val sortable', textContent: 'Value' + arrow('value'), title: 'Sort A–Z' });
+    const hLoc = el('span', { className: 'sortable', textContent: 'Found at' + arrow('loc'), title: 'Sort by position in the document' });
+    hVal.onclick = () => setSort('value');
+    hLoc.onclick = () => setSort('loc');
+    head.append(hVal, hLoc); kv.append(head);
+
+    rows.forEach((item) => {
+      const row = el('div', { className: 'kv-row' });
+      const val = el('span', { className: 'kv-val' });
+      appendHighlighted(val, item.value, filter);
+      row.append(val);
+      row.append(locCell(item, 'kv-loc'));
+      kv.append(row);
+    });
+    host.append(kv);
+  };
+  const setSort = (col) => {
+    if (sortState.col === col) sortState.dir = -sortState.dir; else { sortState.col = col; sortState.dir = 1; }
+    paint();
+  };
+  paint();
 }
 
 // A "Found at" cell/span: the first location + a clickable "(+N more)" that opens
