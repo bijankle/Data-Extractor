@@ -342,8 +342,8 @@
   /* ---- Two pill rows (general / engineering) --------------------------- */
   .pill-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
   .pill-row-label {
-    font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
-    color: var(--faint-2); width: 78px; flex: none;
+    font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+    color: var(--text-primary); width: 84px; flex: none;
   }
 
   /* ---- Two-column location table (value | where it was found) ---------- */
@@ -401,7 +401,7 @@
   .panel-title { display: flex; align-items: baseline; gap: 10px; }
   .panel-title h2 { margin: 0; font-size: 17px; font-weight: 700; color: var(--heading); }
   .panel-title .count { font-size: 13px; color: var(--muted); font-weight: 600; }
-  .panel-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .panel-actions { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
 
   select.fmt {
     height: 34px; padding: 0 10px;
@@ -979,7 +979,7 @@ function extractPdfTables(content, viewport) {
   const clusters = [];
   for (const x of xs) {
     const last = clusters[clusters.length - 1];
-    if (last && x - last.sum / last.n <= 22) { last.sum += x; last.n++; }
+    if (last && x - last.sum / last.n <= 26) { last.sum += x; last.n++; }
     else clusters.push({ sum: x, n: 1 });
   }
   const cols = clusters.filter(c => c.n >= 3).map(c => Math.round(c.sum / c.n)).sort((a, b) => a - b);
@@ -1023,10 +1023,9 @@ function extractPdfTables(content, viewport) {
   return tables;
 }
 
-// Trim leading/trailing rows that are really prose (a wrapped sentence that flowed
-// above/below the grid), not table rows. A prose row has a cell that reads like a
-// sentence: many words, mostly lowercase. Table cells are values or Title-Case
-// labels, so they don't trip this. Only the ends are trimmed.
+// A "prose" row has a cell that reads like a sentence (many words, mostly
+// lowercase) — a wrapped paragraph that flowed through the grid. Table cells are
+// values or Title-Case labels, so they don't trip this.
 function isProseRow(cells) {
   for (const c of cells) {
     if (!c) continue;
@@ -1035,10 +1034,15 @@ function isProseRow(cells) {
   }
   return false;
 }
+// A caption row holds the table's title ("Table 3-1  …") — already shown as the
+// table name, so it shouldn't sit inside the grid.
+function isCaptionRow(cells) {
+  return /\bTable\s*\d+\s*[-–]\s*\d+/i.test(cells.join(' '));
+}
+// Drop prose + caption rows anywhere in the block. If nothing real is left, it
+// wasn't a table (e.g. a numbered paragraph), so return [] to reject it.
 function trimTableRows(rows) {
-  let first = 0; while (first < rows.length && isProseRow(rows[first])) first++;
-  let last = rows.length - 1; while (last >= 0 && isProseRow(rows[last])) last--;
-  return (first > last) ? rows : rows.slice(first, last + 1);
+  return rows.filter(r => !isProseRow(r) && !isCaptionRow(r));
 }
 
 // Drop columns that are filled in <20% of rows (e.g. a centered header sitting
@@ -1048,7 +1052,7 @@ function pruneSparseColumns(rows) {
   const keep = [];
   for (let c = 0; c < nCols; c++) {
     const filled = rows.filter(r => r[c]).length;
-    if (filled / rows.length >= 0.2) keep.push(c);
+    if (filled / rows.length >= 0.34) keep.push(c);
   }
   if (keep.length === nCols || keep.length === 0) return rows;
   const nearestKept = (c) => keep.reduce((best, k) => Math.abs(k - c) < Math.abs(best - c) ? k : best, keep[0]);
@@ -1551,7 +1555,14 @@ function buildOutputControls(cat) {
   }
 
   if (cat.type === 'tables') {
-    // One workbook, one sheet per table (CSV can't hold multiple tabs, so .xlsx).
+    // Copy the selected table (TSV) + download all tables as one Excel workbook.
+    actions.append(iconBtn('copy', 'Copy the selected table to clipboard',
+      async () => {
+        const t = state.results.tables[state.tableSel];
+        if (!t) return;
+        await navigator.clipboard.writeText(rowsToTsv(t.rows));
+        toast('Copied “' + t.name + '” to clipboard.', 'ok');
+      }));
     actions.append(iconBtn('download', 'Download all tables (Excel)',
       () => downloadTablesXlsx(state.results.tables), 'btn-primary'));
   }
@@ -1873,9 +1884,6 @@ function renderOneTable(t, ti, filter) {
   const loc = pageLocation(t.source, t.page);
   if (loc) title.append(el('span', { className: 'tloc', textContent: '  ·  ' + loc }));
   head.append(title);
-  // Copy this table to the clipboard as TSV (pastes cleanly into Excel/Sheets).
-  head.append(iconBtn('copy', 'Copy table to clipboard',
-    async () => { await navigator.clipboard.writeText(rowsToTsv(t.rows)); toast('Copied “' + t.name + '” to clipboard.', 'ok'); }));
   wrap.append(head);
 
   const scroll = el('div', { className: 'tbl-scroll' });
