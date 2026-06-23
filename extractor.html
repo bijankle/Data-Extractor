@@ -1,0 +1,1181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Data Extractor</title>
+
+<!--
+  ============================================================================
+  DATA EXTRACTOR  —  single-file, fully client-side
+  ============================================================================
+  Drop a file or paste text. Everything is parsed in your browser. Nothing is
+  ever uploaded. The ONLY network traffic is pulling parser libraries from a
+  CDN, and even those are loaded lazily (only when a format needs them).
+
+  ARCHITECTURE (one shared spine, not three tools):
+    1. INPUT LAYER     paste box + drag/drop zone (multi-file, pooled)
+    2. ROUTER          detectFormat() dispatches a file to the right parser
+    3. NORMALIZATION   every parser returns the same shape:
+                         { name, text, images:[{name,blob}], tables:[{name,rows}] }
+    4. EXTRACTION      text sieves (regex) + structure lenses (images/tables)
+    5. OUTPUT LAYER    ONE implementation of Copy All / Download, reused by all
+
+  Libraries (lazy-loaded from CDN, see LIBS below):
+    PDF.js, mammoth.js, SheetJS (xlsx), PapaParse, JSZip
+  ============================================================================
+-->
+
+<style>
+  /* ==========================================================================
+     BLURPRINT THEME — design tokens
+     Feel: Discord's rounded geometry tuned for white/paper. Outline over fill,
+     saturated color only in small areas.
+     ========================================================================== */
+  :root {
+    /* Canvas / text */
+    --bg: #FFFFFF;
+    --heading: #1E1F22;
+    --text-primary: #2E3035;
+    --text-body: #4E5058;
+    --text-body-2: #5C5E66;
+    --muted: #80848E;
+    --faint: #9A9DA5;
+    --faint-2: #B5BAC1;
+
+    /* Borders */
+    --border: #E3E5E8;
+    --divider: #F2F3F5;
+    --hairline: #EEF0F2;
+
+    /* Accent (blurple) */
+    --accent: #5865F2;
+    --accent-deep: #4752C4;
+    --accent-tint-bg: #EEF0FE;
+    --accent-tint-border: #E0E3FB;
+    --link: #4752C4;
+
+    /* Status */
+    --success: #3BA55C;
+    --warning: #E0A416;
+    --danger: #D83C3E;
+    --neutral: #B5BAC1;
+
+    /* Neutral ramp */
+    --n0: #FFFFFF;
+    --n1: #F8F9FB;
+    --n2: #F2F3F5;
+    --n3: #E3E5E8;
+
+    /* Radii */
+    --r-card: 12px;
+    --r-btn: 8px;
+    --r-pill: 999px;
+
+    /* Type */
+    --font: 'Aptos','Segoe UI Variable Text','Segoe UI',system-ui,-apple-system,sans-serif;
+    --mono: 'Aptos Mono','Cascadia Code',ui-monospace,monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  ::selection { background: #D9DDFB; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text-body);
+    font-family: var(--font);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+
+  /* ---- Header ---------------------------------------------------------- */
+  header.app {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 6px;
+  }
+  header.app h1 {
+    font-size: 22px;
+    font-weight: 800;
+    color: var(--heading);
+    margin: 0;
+    letter-spacing: -0.2px;
+  }
+  .privacy {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12.5px;
+    color: var(--muted);
+    margin: 0 0 24px 0;
+  }
+  .dot {
+    width: 9px; height: 9px;
+    border-radius: var(--r-pill);
+    background: var(--success);
+    box-shadow: 0 0 0 3px #fff, 0 0 0 4px var(--hairline);
+    flex: none;
+  }
+
+  /* ---- Section label --------------------------------------------------- */
+  .label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1.3px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 10px 0;
+  }
+
+  /* ---- Card ------------------------------------------------------------ */
+  .card {
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    background: var(--bg);
+    padding: 22px;
+    margin-bottom: 18px;
+  }
+
+  /* ---- Input zone ------------------------------------------------------ */
+  .dropzone {
+    position: relative;
+    border: 1.5px dashed var(--faint-2);
+    border-radius: var(--r-card);
+    background: var(--n1);
+    transition: border-color .15s, background .15s;
+  }
+  .dropzone.dragover {
+    border-color: var(--accent);
+    background: var(--accent-tint-bg);
+  }
+  .dropzone textarea {
+    width: 100%;
+    min-height: 150px;
+    resize: vertical;
+    border: none;
+    background: transparent;
+    padding: 18px;
+    font-family: var(--font);
+    font-size: 14.5px;
+    color: var(--text-primary);
+    outline: none;
+    display: block;
+  }
+  .dropzone textarea::placeholder { color: var(--faint); }
+
+  .dz-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--hairline);
+    flex-wrap: wrap;
+  }
+  .dz-hint { font-size: 12.5px; color: var(--muted); }
+
+  /* ---- File chips ------------------------------------------------------ */
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-pill);
+    padding: 5px 6px 5px 12px;
+    font-size: 12.5px;
+    color: var(--text-body);
+    background: var(--bg);
+  }
+  .chip .chip-dot { width: 7px; height: 7px; border-radius: var(--r-pill); flex: none; }
+  .chip-dot.ok { background: var(--success); }
+  .chip-dot.busy { background: var(--warning); }
+  .chip-dot.err { background: var(--danger); }
+  .chip .name { font-weight: 600; color: var(--text-primary); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip .meta { color: var(--muted); }
+  .chip-x {
+    width: 18px; height: 18px;
+    border: none;
+    border-radius: var(--r-pill);
+    background: var(--n2);
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .chip-x:hover { background: var(--n3); color: var(--text-body); }
+
+  /* ---- Buttons --------------------------------------------------------- */
+  button { font-family: var(--font); }
+  .btn {
+    height: 44px;
+    padding: 0 18px;
+    border-radius: var(--r-btn);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid transparent;
+    display: inline-flex; align-items: center; gap: 8px;
+    transition: background .12s, border-color .12s, color .12s;
+  }
+  .btn.sm { height: 34px; padding: 0 13px; font-size: 13px; }
+  .btn.pill { border-radius: var(--r-pill); }
+
+  .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-primary:hover { background: var(--accent-deep); border-color: var(--accent-deep); }
+
+  .btn-secondary { background: #fff; border-color: #C7CAD1; color: var(--text-body); }
+  .btn-secondary:hover { background: var(--n2); border-color: var(--faint-2); }
+
+  .btn-danger { background: #fff; border-color: #EDB5B6; color: var(--danger); }
+  .btn-danger:hover { background: #FCEDED; border-color: #E59A9B; }
+
+  .btn-ghost { background: transparent; border-color: transparent; color: var(--accent); }
+  .btn-ghost:hover { background: var(--accent-tint-bg); }
+
+  .btn:disabled, .btn[disabled] {
+    background: var(--n1); color: var(--faint-2); border-color: var(--n1);
+    cursor: not-allowed;
+  }
+
+  /* ---- Options bar ----------------------------------------------------- */
+  .options { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: center; }
+  .opt {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 13.5px; color: var(--text-body); cursor: pointer; user-select: none;
+  }
+  .opt input[type="checkbox"] { display: none; }
+  .toggle {
+    width: 36px; height: 20px; border-radius: var(--r-pill);
+    background: var(--n3); position: relative; transition: background .15s; flex: none;
+  }
+  .toggle::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 16px; height: 16px; border-radius: var(--r-pill);
+    background: #fff; transition: transform .15s; box-shadow: 0 1px 2px rgba(0,0,0,.18);
+  }
+  .opt input:checked + .toggle { background: var(--accent); }
+  .opt input:checked + .toggle::after { transform: translateX(16px); }
+  .opt input:disabled + .toggle { opacity: .45; }
+
+  /* custom pattern input */
+  .pattern-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 4px; }
+  .text-input {
+    height: 38px; padding: 0 12px;
+    border: 1px solid #C7CAD1; border-radius: var(--r-btn);
+    font-family: var(--mono); font-size: 13px; color: var(--text-primary);
+    background: #fff; outline: none; min-width: 240px; flex: 1;
+  }
+  .text-input:focus { border-color: var(--accent); }
+  .text-input.invalid { border-color: var(--danger); background: #FCEDED; }
+  .pattern-err { font-size: 12px; color: var(--danger); width: 100%; }
+
+  /* ---- Category pills -------------------------------------------------- */
+  .pills { display: flex; flex-wrap: wrap; gap: 9px; }
+  .pill-btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    height: 36px; padding: 0 8px 0 15px;
+    border: 1px solid var(--border); border-radius: var(--r-pill);
+    background: #fff; color: var(--text-body);
+    font-size: 13.5px; font-weight: 500; cursor: pointer;
+    transition: background .12s, border-color .12s, color .12s;
+  }
+  .pill-btn:hover:not(:disabled) { border-color: var(--faint-2); background: var(--n1); }
+  .pill-btn.active { background: var(--accent-tint-bg); border-color: var(--accent-tint-border); color: var(--accent-deep); font-weight: 600; }
+  .pill-btn:disabled { color: var(--faint-2); background: var(--n1); border-color: var(--n2); cursor: not-allowed; }
+  .badge {
+    min-width: 20px; height: 20px; padding: 0 6px;
+    border-radius: var(--r-pill); background: var(--n2); color: var(--muted);
+    font-size: 11.5px; font-weight: 700;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .pill-btn.active .badge { background: var(--accent); color: #fff; }
+  .pill-btn:disabled .badge { background: var(--n2); color: var(--faint-2); }
+
+  /* ---- Results panel --------------------------------------------------- */
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+  }
+  .panel-title { display: flex; align-items: baseline; gap: 10px; }
+  .panel-title h2 { margin: 0; font-size: 17px; font-weight: 700; color: var(--heading); }
+  .panel-title .count { font-size: 13px; color: var(--muted); font-weight: 600; }
+  .panel-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+  select.fmt {
+    height: 34px; padding: 0 10px;
+    border: 1px solid #C7CAD1; border-radius: var(--r-btn);
+    background: #fff; color: var(--text-body); font-size: 13px; font-family: var(--font);
+    cursor: pointer; outline: none;
+  }
+  select.fmt:focus { border-color: var(--accent); }
+
+  /* list results */
+  .list { border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; }
+  .list-row {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 9px 14px; border-top: 1px solid var(--hairline);
+    font-family: var(--mono); font-size: 13px; color: var(--text-primary);
+    word-break: break-all;
+  }
+  .list-row:first-child { border-top: none; }
+  .list-row:nth-child(odd) { background: var(--n1); }
+  .list-row .idx { color: var(--faint-2); font-size: 12px; min-width: 30px; text-align: right; flex: none; user-select: none; }
+
+  /* raw text */
+  pre.raw {
+    margin: 0; max-height: 460px; overflow: auto;
+    border: 1px solid var(--border); border-radius: var(--r-card);
+    padding: 16px; background: var(--n1);
+    font-family: var(--mono); font-size: 12.5px; color: var(--text-primary);
+    white-space: pre-wrap; word-break: break-word;
+  }
+
+  /* image gallery */
+  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
+  .img-card { border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; background: #fff; }
+  .img-card .thumb {
+    height: 130px; background: var(--n2);
+    display: flex; align-items: center; justify-content: center; overflow: hidden;
+  }
+  .img-card .thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .img-card .img-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--hairline); }
+  .img-card .img-name { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* tables */
+  .tbl-wrap { margin-bottom: 22px; }
+  .tbl-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  .tbl-head .tname { font-weight: 700; color: var(--text-primary); font-size: 14px; }
+  .tbl-scroll { overflow: auto; border: 1px solid var(--border); border-radius: var(--r-card); max-height: 420px; }
+  table.data { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.data td, table.data th { border: 1px solid var(--hairline); padding: 6px 10px; text-align: left; white-space: nowrap; color: var(--text-primary); }
+  table.data tr:first-child td { background: var(--n2); font-weight: 700; position: sticky; top: 0; }
+
+  /* empty / placeholder states */
+  .empty {
+    text-align: center; padding: 48px 20px; color: var(--muted);
+    border: 1px dashed var(--border); border-radius: var(--r-card); background: var(--n1);
+  }
+  .empty .big { font-size: 15px; color: var(--text-body); font-weight: 600; margin-bottom: 4px; }
+
+  /* ---- Toasts ---------------------------------------------------------- */
+  #toasts {
+    position: fixed; right: 18px; bottom: 18px;
+    display: flex; flex-direction: column; gap: 10px; z-index: 50; max-width: 360px;
+  }
+  .toast {
+    border: 1px solid var(--border); border-left-width: 3px;
+    border-radius: 10px; background: #fff; padding: 11px 14px;
+    font-size: 13px; color: var(--text-body);
+    box-shadow: 0 6px 24px rgba(30,31,34,.10);
+    animation: calloutIn .18s ease-out;
+  }
+  .toast.error { border-left-color: var(--danger); }
+  .toast.warn  { border-left-color: var(--warning); }
+  .toast.ok    { border-left-color: var(--success); }
+  .toast .t-title { font-weight: 700; color: var(--text-primary); display: block; margin-bottom: 1px; }
+
+  @keyframes calloutIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* small spinner for processing state */
+  .spin { width: 13px; height: 13px; border: 2px solid var(--n3); border-top-color: var(--accent); border-radius: 50%; display: inline-block; animation: sp .7s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="app">
+    <h1>Data Extractor</h1>
+  </header>
+  <p class="privacy"><span class="dot"></span> 100% in your browser — nothing is uploaded. Libraries load from a CDN on first use only.</p>
+
+  <!-- ============================ INPUT LAYER ============================ -->
+  <p class="label">Input</p>
+  <div class="dropzone card" id="dropzone" style="padding:0;">
+    <textarea id="paste" placeholder="Paste text here, or drop a file anywhere on this box…&#10;Supports: TXT, CSV, JSON, HTML, XML, MD, LOG, PDF, DOCX, XLSX"></textarea>
+    <div class="dz-footer">
+      <span class="dz-hint" id="dzHint">Drop files (multiple OK) or paste. Results are pooled.</span>
+      <div style="display:flex; gap:8px;">
+        <button class="btn btn-secondary sm" id="browseBtn">Browse files…</button>
+        <button class="btn btn-danger sm" id="clearBtn">Clear all</button>
+      </div>
+    </div>
+    <input type="file" id="fileInput" multiple class="hidden"
+           accept=".txt,.csv,.json,.html,.htm,.xml,.md,.log,.pdf,.docx,.xlsx" />
+  </div>
+
+  <!-- file chip list -->
+  <div class="chips" id="chips" style="margin:-4px 0 18px;"></div>
+
+  <!-- ============================ OPTIONS =============================== -->
+  <p class="label">Options</p>
+  <div class="card">
+    <div class="options">
+      <label class="opt"><input type="checkbox" id="optDedupe" checked /><span class="toggle"></span> Deduplicate (case-insensitive)</label>
+      <label class="opt"><input type="checkbox" id="optSort" /><span class="toggle"></span> Sort A–Z</label>
+      <label class="opt"><input type="checkbox" id="optIntl" /><span class="toggle"></span> Phones: International (loose)</label>
+    </div>
+    <div class="pattern-row">
+      <label class="opt" style="margin-right:2px;"><input type="checkbox" id="optRegex" /><span class="toggle"></span> Regex</label>
+      <input type="text" class="text-input" id="patternInput" placeholder="Custom lens: type exact text/code to find (toggle Regex for patterns)" />
+      <span class="pattern-err hidden" id="patternErr"></span>
+    </div>
+  </div>
+
+  <!-- ============================ CATEGORIES =========================== -->
+  <p class="label">Categories</p>
+  <div class="pills" id="pills"></div>
+
+  <!-- ============================ RESULTS ============================== -->
+  <div class="card" id="panel" style="margin-top:18px;">
+    <div id="panelBody">
+      <div class="empty">
+        <div class="big">Nothing loaded yet</div>
+        Paste some text or drop a file to get started.
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div id="toasts"></div>
+
+<script>
+/* ============================================================================
+   0. CDN LIBRARY LOADER (lazy)
+   Each parser library is fetched only the first time a format needs it. This
+   keeps initial open instant and minimizes network traffic to the CDN.
+   ========================================================================== */
+const LIBS = {
+  pdfjs:   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
+  pdfWork: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
+  mammoth: 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js',
+  xlsx:    'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
+  papa:    'https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js',
+  jszip:   'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
+};
+
+const _loaded = {};
+function loadScript(url) {
+  if (_loaded[url]) return _loaded[url];
+  _loaded[url] = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = url;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Could not load library from CDN. Check your connection.'));
+    document.head.appendChild(s);
+  });
+  return _loaded[url];
+}
+
+async function ensurePdfjs() {
+  await loadScript(LIBS.pdfjs);
+  // PDF.js renders/parses on its own worker thread => keeps our page responsive.
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = LIBS.pdfWork;
+}
+
+/* ============================================================================
+   1. SMALL UTILITIES
+   ========================================================================== */
+const $  = (sel) => document.querySelector(sel);
+const el = (tag, props = {}, ...kids) => {
+  const n = document.createElement(tag);
+  Object.assign(n, props);
+  for (const k of kids) n.append(k);
+  return n;
+};
+const microYield = () => new Promise(r => setTimeout(r, 0)); // hand control back to the UI
+const fmtBytes = (b) => b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : (b / 1048576).toFixed(1) + ' MB';
+
+function toast(msg, kind = 'ok', title = '') {
+  const t = el('div', { className: 'toast ' + kind });
+  if (title) t.append(el('span', { className: 't-title', textContent: title }));
+  t.append(document.createTextNode(msg));
+  $('#toasts').append(t);
+  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(() => t.remove(), 300); }, 4200);
+}
+
+/* ============================================================================
+   2. EXTRACTION PATTERNS (the text sieves)
+   Each returns matches via a global-flagged regex. A `clean` step trims junk.
+   ========================================================================== */
+const PATTERNS = {
+  emails: {
+    re: /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g,
+  },
+  links: {
+    re: /\b(?:https?:\/\/|www\.)[^\s"'<>)\]}]+/gi,
+    clean: (s) => s.replace(/[.,;:!?'")\]]+$/, ''), // strip trailing sentence punctuation
+  },
+  ips: {
+    // IPv4 with valid octets
+    re: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g,
+  },
+  dates: {
+    re: new RegExp([
+      '\\b\\d{4}-\\d{2}-\\d{2}\\b',                                   // 2024-06-23 (ISO)
+      '\\b\\d{1,2}[\\/\\-.]\\d{1,2}[\\/\\-.]\\d{2,4}\\b',             // 23/06/2024, 6-23-24
+      '\\b\\d{1,2}\\s(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?\\s\\d{2,4}\\b', // 23 June 2024
+      '\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?\\s\\d{1,2},?\\s\\d{2,4}\\b', // June 23, 2024
+    ].join('|'), 'gi'),
+  },
+  money: {
+    re: new RegExp([
+      '(?:A\\$|US\\$|NZ\\$|\\$|€|£|¥)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?', // $1,234.56 / A$50
+      '\\d[\\d,]*(?:\\.\\d{1,2})?\\s?(?:AUD|USD|EUR|GBP|NZD|JPY)\\b',  // 1,234.56 AUD
+    ].join('|'), 'gi'),
+  },
+};
+
+/* Phone numbers — Australian-first (default) and an International loose mode. */
+const PHONE_AU = new RegExp([
+  '\\+61\\s?4\\d{2}\\s?\\d{3}\\s?\\d{3}',          // +61 4xx xxx xxx (mobile, intl)
+  '\\+61\\s?[2378]\\s?\\d{4}\\s?\\d{4}',           // +61 x xxxx xxxx (landline, intl)
+  '\\b04\\d{2}\\s?\\d{3}\\s?\\d{3}\\b',            // 04xx xxx xxx (mobile)
+  '\\b0[2378]\\s?\\d{4}\\s?\\d{4}\\b',             // 0x xxxx xxxx (landline)
+  '\\b1[38]00\\s?\\d{3}\\s?\\d{3}\\b',             // 1300 / 1800 xxx xxx
+  '\\b13\\s?\\d{2}\\s?\\d{2}\\b',                  // 13 xx xx
+].join('|'), 'g');
+
+// Loose international: a +, then 8–15 digits with common separators. Catches more
+// (and produces more false positives) — exactly the documented trade-off.
+const PHONE_INTL = /(?:\+\d{1,3}[\s.\-]?)?(?:\(\d{1,4}\)[\s.\-]?)?\d{2,4}(?:[\s.\-]?\d{2,4}){2,4}/g;
+
+/* ============================================================================
+   3. FORMAT ROUTER + PARSERS
+   Every parser resolves to the normalized shape:
+     { text, images:[{name,blob}], tables:[{name,rows}] }
+   ========================================================================== */
+function detectFormat(file) {
+  const name = file.name.toLowerCase();
+  const ext = name.slice(name.lastIndexOf('.') + 1);
+  if (['txt','csv','json','html','htm','xml','md','log','text'].includes(ext)) return ext === 'htm' ? 'html' : ext;
+  if (ext === 'pdf') return 'pdf';
+  if (ext === 'docx') return 'docx';
+  if (ext === 'xlsx') return 'xlsx';
+  if (ext === 'doc') return 'doc-legacy';   // explicitly out of scope
+  return 'unknown';
+}
+
+async function readAsText(file)        { return await file.text(); }
+async function readAsArrayBuffer(file) { return await file.arrayBuffer(); }
+
+/* --- Plain text family ------------------------------------------------- */
+async function parsePlain(file) {
+  const raw = await readAsText(file);
+  return { sieveText: raw, displayText: raw, images: [], tables: [] };
+}
+
+/* --- HTML: strip tags for display, but sieve the raw markup (catches hrefs) */
+async function parseHtml(file) {
+  const raw = await readAsText(file);
+  const doc = new DOMParser().parseFromString(raw, 'text/html');
+  const clean = (doc.body ? doc.body.innerText : doc.documentElement.textContent) || '';
+  return { sieveText: raw + '\n' + clean, displayText: clean.trim(), images: [], tables: [] };
+}
+
+/* --- CSV via PapaParse -> one table + flattened text ------------------- */
+async function parseCsv(file) {
+  await loadScript(LIBS.papa);
+  const raw = await readAsText(file);
+  const parsed = window.Papa.parse(raw.trim(), { skipEmptyLines: true });
+  const rows = parsed.data;
+  const tables = rows.length ? [{ name: file.name, rows }] : [];
+  return { sieveText: raw, displayText: raw, images: [], tables };
+}
+
+/* --- JSON: pretty-print for display, sieve the raw ---------------------- */
+async function parseJson(file) {
+  const raw = await readAsText(file);
+  let display = raw;
+  try { display = JSON.stringify(JSON.parse(raw), null, 2); } catch (_) { /* leave as-is */ }
+  return { sieveText: raw, displayText: display, images: [], tables: [] };
+}
+
+/* --- PDF via PDF.js: text + embedded images ---------------------------- */
+async function parsePdf(file) {
+  await ensurePdfjs();
+  const data = await readAsArrayBuffer(file);
+  const pdf = await window.pdfjsLib.getDocument({ data }).promise;
+  let text = '';
+  const images = [];
+  const seen = new Set();
+
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+
+    // --- text layer ---
+    const content = await page.getTextContent();
+    text += content.items.map(i => i.str).join(' ') + '\n';
+
+    // --- embedded images: walk the operator list for image paints ---
+    try {
+      const ops = await page.getOperatorList();
+      const OPS = window.pdfjsLib.OPS;
+      for (let i = 0; i < ops.fnArray.length; i++) {
+        const fn = ops.fnArray[i];
+        if (fn === OPS.paintImageXObject || fn === OPS.paintJpegXObject || fn === OPS.paintImageXObjectRepeat) {
+          const objName = ops.argsArray[i][0];
+          const key = p + ':' + objName;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const blob = await pdfImageToBlob(page, objName);
+          if (blob) images.push({ name: `p${p}-${objName}.png`, blob });
+        }
+      }
+    } catch (_) { /* image extraction is best-effort */ }
+
+    await microYield(); // never block the UI between pages
+  }
+
+  if (!text.trim() && pdf.numPages > 0) {
+    toast('This PDF has no extractable text layer (it may be scanned images). OCR is not included in v1.', 'warn', file.name);
+  }
+  return { sieveText: text, displayText: text.trim(), images, tables: [] };
+}
+
+// Pull one image object out of a PDF page and convert it to a PNG blob.
+function pdfImageToBlob(page, objName) {
+  return new Promise((resolve) => {
+    const handle = (img) => {
+      try {
+        if (!img) return resolve(null);
+        const w = img.width, h = img.height;
+        if (!w || !h || w * h < 64) return resolve(null); // skip 1px spacers / junk
+        const canvas = el('canvas'); canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (img.bitmap) {
+          ctx.drawImage(img.bitmap, 0, 0);
+        } else if (img.data) {
+          const out = ctx.createImageData(w, h);
+          const d = img.data, n = w * h;
+          if (d.length === n * 4)      { out.data.set(d); }                                   // RGBA
+          else if (d.length === n * 3) { for (let i=0,j=0;i<d.length;i+=3,j+=4){ out.data[j]=d[i]; out.data[j+1]=d[i+1]; out.data[j+2]=d[i+2]; out.data[j+3]=255; } } // RGB
+          else if (d.length === n)     { for (let i=0,j=0;i<n;i++,j+=4){ out.data[j]=out.data[j+1]=out.data[j+2]=d[i]; out.data[j+3]=255; } } // grayscale
+          else return resolve(null);
+          ctx.putImageData(out, 0, 0);
+        } else return resolve(null);
+        canvas.toBlob((b) => resolve(b), 'image/png');
+      } catch (_) { resolve(null); }
+    };
+    // image objects live on page.objs; resolve via callback when ready
+    try { page.objs.get(objName, handle); }
+    catch (_) { resolve(null); }
+  });
+}
+
+/* --- DOCX via mammoth: raw text + embedded images ---------------------- */
+async function parseDocx(file) {
+  await loadScript(LIBS.mammoth);
+  const arrayBuffer = await readAsArrayBuffer(file);
+  const images = [];
+
+  // Custom image handler: collect each embedded image as a blob.
+  const convertImage = window.mammoth.images.imgElement(async (image) => {
+    const buf = await image.read('base64');
+    const blob = base64ToBlob(buf, image.contentType || 'image/png');
+    const ext = (image.contentType || 'image/png').split('/')[1] || 'png';
+    images.push({ name: `image-${images.length + 1}.${ext}`, blob });
+    return {}; // we don't need the HTML <img>, just the asset
+  });
+
+  const textResult = await window.mammoth.extractRawText({ arrayBuffer });
+  // Run a second pass purely to trigger the image handler.
+  await window.mammoth.convertToHtml({ arrayBuffer }, { convertImage });
+
+  const text = textResult.value || '';
+  return { sieveText: text, displayText: text.trim(), images, tables: [] };
+}
+
+/* --- XLSX via SheetJS: every sheet -> a table + flattened text --------- */
+async function parseXlsx(file) {
+  await loadScript(LIBS.xlsx);
+  const data = await readAsArrayBuffer(file);
+  const wb = window.XLSX.read(data, { type: 'array' });
+  const tables = [];
+  let text = '';
+  for (const sheetName of wb.SheetNames) {
+    const ws = wb.Sheets[sheetName];
+    const rows = window.XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, defval: '' });
+    if (rows.length) tables.push({ name: sheetName, rows });
+    text += window.XLSX.utils.sheet_to_csv(ws) + '\n';
+  }
+  return { sieveText: text, displayText: text.trim(), images: [], tables };
+}
+
+// Route a single file to its parser.
+async function parseFile(file) {
+  const fmt = detectFormat(file);
+  switch (fmt) {
+    case 'txt': case 'log': case 'md': case 'xml': case 'text': return parsePlain(file);
+    case 'html': return parseHtml(file);
+    case 'csv':  return parseCsv(file);
+    case 'json': return parseJson(file);
+    case 'pdf':  return parsePdf(file);
+    case 'docx': return parseDocx(file);
+    case 'xlsx': return parseXlsx(file);
+    case 'doc-legacy':
+      throw new Error('Legacy .doc is out of scope. Please re-save as .docx.');
+    default:
+      throw new Error('Unsupported file type. Supported: TXT, CSV, JSON, HTML, XML, MD, LOG, PDF, DOCX, XLSX.');
+  }
+}
+
+/* small helpers for binary <-> blob */
+function base64ToBlob(b64, type) {
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type });
+}
+
+/* ============================================================================
+   4. APPLICATION STATE
+   `sources` is the pool. 'paste' is a reserved source updated live. recompute()
+   merges everything and runs the extraction layer.
+   ========================================================================== */
+const state = {
+  sources: [],          // { id, name, status:'ok'|'busy'|'err', sieveText, displayText, images[], tables[] }
+  results: null,        // computed by recompute()
+  active: 'rawText',    // currently selected category
+};
+
+// Definition of every category lens. `kind`: 'text' sieve, 'list' (custom),
+// 'raw' text, or 'structure' (images/tables).
+const CATEGORIES = [
+  { key: 'emails',  label: 'Emails',  type: 'list' },
+  { key: 'links',   label: 'Links',   type: 'list' },
+  { key: 'phones',  label: 'Phones',  type: 'list' },
+  { key: 'ips',     label: 'IPs',     type: 'list' },
+  { key: 'dates',   label: 'Dates',   type: 'list' },
+  { key: 'money',   label: 'Money',   type: 'list' },
+  { key: 'custom',  label: 'Custom',  type: 'list' },
+  { key: 'images',  label: 'Images',  type: 'images' },
+  { key: 'tables',  label: 'Tables',  type: 'tables' },
+  { key: 'rawText', label: 'Raw Text', type: 'raw' },
+];
+
+/* ----- run all text sieves over the merged text, chunked to stay smooth --- */
+async function runSieves(text) {
+  const out = { emails: [], links: [], phones: [], ips: [], dates: [], money: [], custom: [] };
+  if (!text) return out;
+
+  const phoneRe = $('#optIntl').checked ? PHONE_INTL : PHONE_AU;
+  const customRe = buildCustomRegex(); // may be null
+
+  // Chunk by lines so we can yield to the UI on big inputs. The built-in
+  // patterns are all single-line, so line-chunking never splits a match.
+  const lines = text.split('\n');
+  const CHUNK = 3000;
+  for (let i = 0; i < lines.length; i += CHUNK) {
+    const seg = lines.slice(i, i + CHUNK).join('\n');
+
+    collect(out.emails, seg, PATTERNS.emails);
+    collect(out.links,  seg, PATTERNS.links);
+    collect(out.ips,    seg, PATTERNS.ips);
+    collect(out.dates,  seg, PATTERNS.dates);
+    collect(out.money,  seg, PATTERNS.money);
+    collectRe(out.phones, seg, phoneRe);
+    if (customRe) collectRe(out.custom, seg, customRe);
+
+    if (lines.length > CHUNK) await microYield();
+  }
+  return out;
+}
+
+function collect(bucket, text, pattern) {
+  const m = text.match(pattern.re);
+  if (!m) return;
+  for (let s of m) { if (pattern.clean) s = pattern.clean(s); s = s.trim(); if (s) bucket.push(s); }
+}
+function collectRe(bucket, text, re) {
+  const m = text.match(re);
+  if (!m) return;
+  for (let s of m) { s = s.trim(); if (s && s.replace(/\D/g, '').length >= 6) bucket.push(s); }
+}
+
+// Build the custom-lens regex from the input + Regex toggle.
+function buildCustomRegex() {
+  const raw = $('#patternInput').value;
+  if (!raw) { setPatternError(''); return null; }
+  try {
+    let re;
+    if ($('#optRegex').checked) {
+      re = new RegExp(raw, 'gi');
+    } else {
+      // Plain mode: escape everything, match the literal string.
+      const esc = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      re = new RegExp(esc, 'gi');
+    }
+    setPatternError('');
+    return re;
+  } catch (e) {
+    setPatternError('Invalid regex: ' + e.message);
+    return null;
+  }
+}
+function setPatternError(msg) {
+  const err = $('#patternErr'), inp = $('#patternInput');
+  if (msg) { err.textContent = msg; err.classList.remove('hidden'); inp.classList.add('invalid'); }
+  else { err.classList.add('hidden'); inp.classList.remove('invalid'); }
+}
+
+/* ----- merge pool -> run extraction -> render --------------------------- */
+let recomputeToken = 0;
+async function recompute() {
+  const myToken = ++recomputeToken; // guard against overlapping async runs
+
+  const ready = state.sources.filter(s => s.status === 'ok');
+  const sieveText   = ready.map(s => s.sieveText).join('\n\n');
+  const displayText = ready.map(s => s.displayText).filter(Boolean).join('\n\n— — —\n\n');
+  const images = ready.flatMap(s => s.images);
+  const tables = ready.flatMap(s => s.tables);
+
+  const sieves = await runSieves(sieveText);
+  if (myToken !== recomputeToken) return; // a newer run superseded us
+
+  state.results = { ...sieves, rawText: displayText, images, tables };
+
+  // Apply list options (dedupe/sort) once, store the display-ready arrays.
+  state.display = {};
+  for (const cat of CATEGORIES) {
+    if (cat.type === 'list') state.display[cat.key] = applyListOptions(state.results[cat.key] || []);
+  }
+
+  renderPills();
+  renderPanel();
+}
+
+function applyListOptions(arr) {
+  let items = arr.slice();
+  if ($('#optDedupe').checked) {
+    const seen = new Set(); const out = [];
+    for (const x of items) { const k = x.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(x); } }
+    items = out;
+  }
+  if ($('#optSort').checked) items.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  return items;
+}
+
+// How many items does a category currently hold? Drives badges + enabled state.
+function countOf(key) {
+  if (!state.results) return 0;
+  if (key === 'rawText') return state.results.rawText ? 1 : 0;
+  if (key === 'images')  return state.results.images.length;
+  if (key === 'tables')  return state.results.tables.length;
+  return (state.display[key] || []).length;
+}
+
+/* ============================================================================
+   5. RENDERING
+   ========================================================================== */
+function renderPills() {
+  const wrap = $('#pills'); wrap.innerHTML = '';
+  for (const cat of CATEGORIES) {
+    const n = countOf(cat.key);
+    const enabled = n > 0;
+    const btn = el('button', {
+      className: 'pill-btn' + (state.active === cat.key && enabled ? ' active' : ''),
+      disabled: !enabled,
+      onclick: () => { state.active = cat.key; renderPills(); renderPanel(); },
+    });
+    btn.append(cat.label);
+    // Raw Text shows no count badge (it's a single view); others do.
+    if (cat.key !== 'rawText') btn.append(el('span', { className: 'badge', textContent: String(n) }));
+    wrap.append(btn);
+  }
+  // If the active category became empty (e.g. options changed), fall back.
+  if (countOf(state.active) === 0) {
+    const firstActive = CATEGORIES.find(c => countOf(c.key) > 0);
+    state.active = firstActive ? firstActive.key : 'rawText';
+  }
+}
+
+function renderPanel() {
+  const body = $('#panelBody'); body.innerHTML = '';
+
+  const anything = CATEGORIES.some(c => countOf(c.key) > 0);
+  if (!anything) {
+    body.append(el('div', { className: 'empty', innerHTML:
+      '<div class="big">Nothing loaded yet</div>Paste some text or drop a file to get started.' }));
+    return;
+  }
+
+  const cat = CATEGORIES.find(c => c.key === state.active);
+  const n = countOf(cat.key);
+
+  // ----- header (title + shared output controls) -----
+  const head = el('div', { className: 'panel-head' });
+  const title = el('div', { className: 'panel-title' });
+  title.append(el('h2', { textContent: cat.label }));
+  if (cat.key !== 'rawText') title.append(el('span', { className: 'count', textContent: n + (n === 1 ? ' result' : ' results') }));
+  head.append(title);
+  head.append(buildOutputControls(cat));
+  body.append(head);
+
+  // ----- body by type -----
+  if (cat.type === 'list')        renderList(body, state.display[cat.key]);
+  else if (cat.type === 'raw')    renderRaw(body, state.results.rawText);
+  else if (cat.type === 'images') renderGallery(body, state.results.images);
+  else if (cat.type === 'tables') renderTables(body, state.results.tables);
+}
+
+/* shared output layer: Copy All + Download (format-aware) ---------------- */
+function buildOutputControls(cat) {
+  const actions = el('div', { className: 'panel-actions' });
+
+  if (cat.type === 'list' || cat.type === 'raw') {
+    const getItems = () => cat.type === 'raw' ? [state.results.rawText] : state.display[cat.key];
+
+    actions.append(el('button', {
+      className: 'btn btn-secondary sm', textContent: 'Copy All',
+      onclick: async () => {
+        await navigator.clipboard.writeText(getItems().join('\n'));
+        toast('Copied ' + (cat.type === 'raw' ? 'text' : getItems().length + ' items') + ' to clipboard.', 'ok');
+      },
+    }));
+
+    // format selector (TXT / CSV / JSON); raw text is TXT only
+    let fmt = 'txt';
+    if (cat.type === 'list') {
+      const sel = el('select', { className: 'fmt', onchange: (e) => fmt = e.target.value });
+      sel.append(el('option', { value: 'txt', textContent: 'TXT' }));
+      sel.append(el('option', { value: 'csv', textContent: 'CSV' }));
+      sel.append(el('option', { value: 'json', textContent: 'JSON' }));
+      actions.append(sel);
+    }
+
+    actions.append(el('button', {
+      className: 'btn btn-primary sm', textContent: 'Download',
+      onclick: () => {
+        const items = getItems();
+        if (cat.type === 'raw') return downloadText(items[0], cat.key + '.txt');
+        if (fmt === 'txt')  downloadText(items.join('\n'), cat.key + '.txt');
+        if (fmt === 'csv')  downloadText(toCsvColumn(cat.label, items), cat.key + '.csv');
+        if (fmt === 'json') downloadText(JSON.stringify(items, null, 2), cat.key + '.json');
+      },
+    }));
+  }
+
+  if (cat.type === 'images') {
+    actions.append(el('button', {
+      className: 'btn btn-primary sm', textContent: 'Download all (.zip)',
+      onclick: () => downloadImagesZip(state.results.images),
+    }));
+  }
+
+  if (cat.type === 'tables') {
+    actions.append(el('button', {
+      className: 'btn btn-secondary sm', textContent: 'Copy All (CSV)',
+      onclick: async () => { await navigator.clipboard.writeText(tablesToCsv(state.results.tables)); toast('Tables copied as CSV.', 'ok'); },
+    }));
+    actions.append(el('button', {
+      className: 'btn btn-primary sm', textContent: 'Download all (CSV)',
+      onclick: () => downloadText(tablesToCsv(state.results.tables), 'tables.csv'),
+    }));
+  }
+
+  return actions;
+}
+
+function renderList(body, items) {
+  if (!items.length) { body.append(el('div', { className: 'empty', textContent: 'No matches.' })); return; }
+  const list = el('div', { className: 'list' });
+  items.forEach((item, i) => {
+    const row = el('div', { className: 'list-row' });
+    row.append(el('span', { className: 'idx', textContent: String(i + 1) }));
+    row.append(el('span', { textContent: item }));
+    list.append(row);
+  });
+  body.append(list);
+}
+
+function renderRaw(body, text) {
+  body.append(el('pre', { className: 'raw', textContent: text || '(empty)' }));
+}
+
+function renderGallery(body, images) {
+  const grid = el('div', { className: 'gallery' });
+  images.forEach((img) => {
+    const url = URL.createObjectURL(img.blob);
+    const card = el('div', { className: 'img-card' });
+    const thumb = el('div', { className: 'thumb' });
+    thumb.append(el('img', { src: url, alt: img.name, loading: 'lazy' }));
+    const foot = el('div', { className: 'img-foot' });
+    foot.append(el('span', { className: 'img-name', textContent: img.name, title: img.name }));
+    foot.append(el('button', { className: 'btn btn-ghost sm', textContent: 'Save',
+      onclick: () => downloadBlob(img.blob, img.name) }));
+    card.append(thumb); card.append(foot);
+    grid.append(card);
+  });
+  body.append(grid);
+}
+
+function renderTables(body, tables) {
+  tables.forEach((t, ti) => {
+    const wrap = el('div', { className: 'tbl-wrap' });
+    const head = el('div', { className: 'tbl-head' });
+    head.append(el('span', { className: 'tname', textContent: t.name }));
+    head.append(el('button', { className: 'btn btn-secondary sm', textContent: 'Download CSV',
+      onclick: () => downloadText(rowsToCsv(t.rows), (t.name || ('table' + ti)) + '.csv') }));
+    wrap.append(head);
+
+    const scroll = el('div', { className: 'tbl-scroll' });
+    const table = el('table', { className: 'data' });
+    t.rows.slice(0, 500).forEach((r) => { // cap render at 500 rows for responsiveness
+      const tr = el('tr');
+      (Array.isArray(r) ? r : [r]).forEach((c) => tr.append(el('td', { textContent: c == null ? '' : String(c) })));
+      table.append(tr);
+    });
+    scroll.append(table);
+    wrap.append(scroll);
+    if (t.rows.length > 500) wrap.append(el('div', { className: 'dz-hint', style: 'margin-top:6px;',
+      textContent: `Showing first 500 of ${t.rows.length} rows. Download CSV for the full table.` }));
+    body.append(wrap);
+  });
+}
+
+/* ============================================================================
+   6. OUTPUT HELPERS (download / CSV building)
+   ========================================================================== */
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = el('a', { href: url, download: filename });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function downloadText(text, filename) {
+  downloadBlob(new Blob([text], { type: 'text/plain;charset=utf-8' }), filename);
+}
+function csvCell(v) {
+  const s = v == null ? '' : String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function toCsvColumn(header, items) {
+  return [csvCell(header), ...items.map(csvCell)].join('\n');
+}
+function rowsToCsv(rows) {
+  return rows.map(r => (Array.isArray(r) ? r : [r]).map(csvCell).join(',')).join('\n');
+}
+function tablesToCsv(tables) {
+  return tables.map(t => `# ${t.name}\n${rowsToCsv(t.rows)}`).join('\n\n');
+}
+async function downloadImagesZip(images) {
+  if (!images.length) return;
+  try {
+    await loadScript(LIBS.jszip);
+    const zip = new window.JSZip();
+    images.forEach((img, i) => zip.file(img.name || ('image-' + (i + 1) + '.png'), img.blob));
+    const blob = await zip.generateAsync({ type: 'blob' });
+    downloadBlob(blob, 'images.zip');
+    toast(`Zipped ${images.length} image${images.length === 1 ? '' : 's'}.`, 'ok');
+  } catch (e) {
+    toast(e.message, 'error', 'Zip failed');
+  }
+}
+
+/* ============================================================================
+   7. INPUT WIRING (paste, drag/drop, browse, chips)
+   ========================================================================== */
+let pasteDebounce;
+$('#paste').addEventListener('input', (e) => {
+  clearTimeout(pasteDebounce);
+  pasteDebounce = setTimeout(() => {
+    const text = e.target.value;
+    // 'paste' is a reserved single source kept in sync with the textarea.
+    const existing = state.sources.find(s => s.id === 'paste');
+    if (!text.trim()) {
+      if (existing) state.sources = state.sources.filter(s => s.id !== 'paste');
+    } else if (existing) {
+      existing.sieveText = text; existing.displayText = text;
+    } else {
+      state.sources.unshift({ id: 'paste', name: 'Pasted text', status: 'ok', sieveText: text, displayText: text, images: [], tables: [] });
+    }
+    renderChips();
+    recompute();
+  }, 180);
+});
+
+// File ingestion (from drop or browse)
+async function ingestFiles(fileList) {
+  const files = Array.from(fileList);
+  for (const file of files) {
+    const id = 'f' + Date.now() + Math.random().toString(36).slice(2, 7);
+    const src = { id, name: file.name, size: file.size, status: 'busy', sieveText: '', displayText: '', images: [], tables: [] };
+    state.sources.push(src);
+    renderChips();
+
+    try {
+      const norm = await parseFile(file);
+      Object.assign(src, norm, { status: 'ok' });
+      toast(`Parsed “${file.name}”.`, 'ok');
+    } catch (e) {
+      src.status = 'err';
+      toast(e.message, 'error', file.name);
+    }
+    renderChips();
+    await recompute();
+  }
+}
+
+function renderChips() {
+  const wrap = $('#chips'); wrap.innerHTML = '';
+  for (const src of state.sources) {
+    const chip = el('div', { className: 'chip' });
+    const dot = el('span', { className: 'chip-dot ' + (src.status === 'ok' ? 'ok' : src.status === 'err' ? 'err' : 'busy') });
+    chip.append(dot);
+    chip.append(el('span', { className: 'name', textContent: src.name }));
+    if (src.status === 'busy') chip.append(el('span', { className: 'spin' }));
+    else if (src.size != null) chip.append(el('span', { className: 'meta', textContent: fmtBytes(src.size) }));
+    const x = el('button', { className: 'chip-x', textContent: '×', title: 'Remove',
+      onclick: () => {
+        state.sources = state.sources.filter(s => s.id !== src.id);
+        if (src.id === 'paste') $('#paste').value = '';
+        renderChips(); recompute();
+      } });
+    chip.append(x);
+    wrap.append(chip);
+  }
+}
+
+/* drag & drop on the whole dropzone */
+const dz = $('#dropzone');
+['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('dragover'); }));
+['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, (e) => { e.preventDefault(); if (ev === 'drop' || e.target === dz) dz.classList.remove('dragover'); }));
+dz.addEventListener('drop', (e) => { if (e.dataTransfer.files.length) ingestFiles(e.dataTransfer.files); });
+
+$('#browseBtn').addEventListener('click', () => $('#fileInput').click());
+$('#fileInput').addEventListener('change', (e) => { if (e.target.files.length) ingestFiles(e.target.files); e.target.value = ''; });
+
+$('#clearBtn').addEventListener('click', () => {
+  state.sources = []; $('#paste').value = ''; state.results = null; state.display = {};
+  renderChips(); renderPills(); renderPanel();
+});
+
+/* options re-run extraction without re-parsing files */
+['#optDedupe', '#optSort', '#optIntl', '#optRegex'].forEach(sel => $(sel).addEventListener('change', recompute));
+let patternDebounce;
+$('#patternInput').addEventListener('input', () => { clearTimeout(patternDebounce); patternDebounce = setTimeout(recompute, 150); });
+
+// first paint
+renderPills();
+renderPanel();
+</script>
+</body>
+</html>
