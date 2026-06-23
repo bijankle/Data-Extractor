@@ -1333,7 +1333,8 @@ function applyListOptions(arr) {
   if ($('#optDedupe').checked) {
     const map = new Map();
     for (const it of arr) {
-      const k = it.value.toLowerCase();
+      // Whitespace-insensitive key: "100%", "100 %" and "100% " collapse to one row.
+      const k = it.value.toLowerCase().replace(/\s+/g, '');
       if (map.has(k)) map.get(k).indices.push(it.index);
       else map.set(k, { value: it.value, index: it.index, indices: [it.index] });
     }
