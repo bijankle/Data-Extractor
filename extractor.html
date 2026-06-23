@@ -296,6 +296,23 @@
   .pill-btn.active .badge { background: var(--accent); color: #fff; }
   .pill-btn:disabled .badge { background: var(--n2); color: var(--faint-2); }
 
+  /* ---- Global filter --------------------------------------------------- */
+  .filterbar { margin-bottom: 18px; }
+  .filter-input {
+    width: 100%; height: 44px; padding: 0 16px;
+    border: 1px solid #C7CAD1; border-radius: var(--r-btn);
+    font-size: 14px; font-family: var(--font); color: var(--text-primary); background: #fff; outline: none;
+  }
+  .filter-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint-bg); }
+  .filter-info { display: block; font-size: 12px; color: var(--muted); margin-top: 7px; min-height: 14px; }
+  mark.hl { background: #FFE9A8; color: inherit; border-radius: 3px; padding: 0 1px; }
+  mark.hl.cur { background: #F7B500; color: #1E1F22; }
+
+  /* raw-text match navigator */
+  .raw-nav { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .raw-count { font-size: 12.5px; color: var(--muted); font-weight: 600; margin-right: 4px; }
+  .raw-nav .btn { width: 34px; padding: 0; justify-content: center; font-size: 17px; }
+
   /* ---- Tabs (General / Engineering) ------------------------------------ */
   .tabs { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--n1); margin-bottom: 16px; }
   .tab {
@@ -371,7 +388,7 @@
 
   /* raw text */
   pre.raw {
-    margin: 0; max-height: 460px; overflow: auto;
+    margin: 0; max-height: 460px; overflow: auto; position: relative;
     border: 1px solid var(--border); border-radius: var(--r-card);
     padding: 16px; background: var(--n1);
     font-family: var(--mono); font-size: 12.5px; color: var(--text-primary);
@@ -407,11 +424,6 @@
   /* tables — master/detail */
   .tbl-layout { display: flex; gap: 16px; align-items: flex-start; }
   .tbl-side { width: 250px; flex: none; display: flex; flex-direction: column; gap: 10px; }
-  .tbl-search {
-    height: 36px; padding: 0 12px; border: 1px solid #C7CAD1; border-radius: var(--r-btn);
-    font-size: 13px; font-family: var(--font); color: var(--text-primary); background: #fff; outline: none;
-  }
-  .tbl-search:focus { border-color: var(--accent); }
   .tbl-list { display: flex; flex-direction: column; gap: 6px; max-height: 540px; overflow: auto; }
   .tbl-item {
     text-align: left; border: 1px solid var(--border); border-radius: 8px; background: #fff;
@@ -502,6 +514,13 @@
       <label class="opt"><input type="checkbox" id="optDedupe" checked /><span class="toggle"></span> No duplicates (not case sensitive)</label>
       <label class="opt"><input type="checkbox" id="optSort" /><span class="toggle"></span> Sort A–Z</label>
     </div>
+  </div>
+
+  <!-- ============================ GLOBAL FILTER ========================= -->
+  <p class="label">Filter</p>
+  <div class="filterbar">
+    <input id="globalFilter" class="filter-input" type="search" placeholder="🔍  Filter everything — only matching results are shown, and matches are highlighted" />
+    <span id="filterInfo" class="filter-info"></span>
   </div>
 
   <!-- ============================ CATEGORIES =========================== -->
@@ -1114,8 +1133,8 @@ const state = {
   active: 'rawText',    // currently selected category
   tab: 'general',       // 'general' | 'engineering'
   tableSel: 0,          // selected table index in the Tables lens
-  tableQuery: '',       // Tables lens search text
-  paramSort: { col: null, dir: 1 }, // Parameters lens sort: col 'value'|'unit', dir 1 asc / -1 desc
+  filter: '',           // global filter text (applies to every lens)
+  paramSort: { col: null, dir: 1 }, // Parameters lens sort: col 'value'|'unit'|'loc', dir 1 asc / -1 desc
 };
 
 // Definition of every category lens.
@@ -1238,6 +1257,7 @@ async function recompute() {
 
   renderPills();
   renderPanel();
+  updateFilterInfo();
 }
 
 // Dedupe (case-insensitive) and order the items. Every occurrence's offset is
@@ -1289,13 +1309,65 @@ function pageLocation(source, page) {
   return loc.multi ? source : '';
 }
 
+/* ----------------------------------------------------------------------------
+   GLOBAL FILTER
+   Smart matching (case/space/punctuation-insensitive — "lo l" matches "lol")
+   used for both filtering and highlighting. Raw Text and Images are never
+   filtered out (per design): Raw Text just highlights + offers match navigation,
+   Images always show.
+   -------------------------------------------------------------------------- */
+function getFilter() {
+  const q = (state.filter || '').trim();
+  if (!q) return null;
+  const norm = q.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!norm) return null;
+  // chars in order, allowing any non-alphanumerics between them
+  const src = norm.split('').join('[^a-zA-Z0-9]*');
+  return { src, test: (s) => new RegExp(src, 'i').test(s || '') };
+}
+
+// Append `text` to `parent`, wrapping filter matches in <mark> (collected into
+// `marks` if provided). Uses text nodes only — never innerHTML — so it is safe.
+function appendHighlighted(parent, text, filter, marks) {
+  text = text == null ? '' : String(text);
+  if (!filter) { parent.append(document.createTextNode(text)); return; }
+  const re = new RegExp(filter.src, 'gi');
+  let last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index === re.lastIndex) { re.lastIndex++; continue; }
+    if (!m[0]) continue;
+    if (m.index > last) parent.append(document.createTextNode(text.slice(last, m.index)));
+    const mk = el('mark', { className: 'hl', textContent: m[0] });
+    if (marks) marks.push(mk);
+    parent.append(mk);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
+}
+
+// Filtered list items (by value). No filter => unchanged.
+function applyFilterList(items) {
+  const f = getFilter();
+  return f ? items.filter(it => f.test(it.value)) : items;
+}
+// Does a table contain the filter term anywhere (name or cells)?
+function tableMatches(t, f) {
+  return !f || f.test(t.name + ' ' + t.rows.map(r => (Array.isArray(r) ? r : [r]).join(' ')).join(' '));
+}
+function filteredTables() {
+  const f = getFilter();
+  return (state.results ? state.results.tables : []).filter(t => tableMatches(t, f));
+}
+
 // How many items does a category currently hold? Drives badges + enabled state.
+// With a filter active, list lenses and Tables reflect matching counts; Raw Text
+// and Images are never filtered.
 function countOf(key) {
   if (!state.results) return 0;
   if (key === 'rawText') return state.results.rawText ? 1 : 0;
   if (key === 'images')  return state.results.images.length;
-  if (key === 'tables')  return state.results.tables.length;
-  return (state.display[key] || []).length;
+  if (key === 'tables')  return filteredTables().length;
+  return applyFilterList(state.display[key] || []).length;
 }
 
 /* ============================================================================
@@ -1351,9 +1423,9 @@ function renderPanel() {
   head.append(buildOutputControls(cat));
   body.append(head);
 
-  // ----- body by type -----
-  if (cat.key === 'parameters')   renderParameters(body, state.display[cat.key]);
-  else if (cat.type === 'list')   renderList(body, state.display[cat.key]);
+  // ----- body by type ----- (list lenses get filtered to matching items)
+  if (cat.key === 'parameters')   renderParameters(body, applyFilterList(state.display[cat.key]));
+  else if (cat.type === 'list')   renderList(body, applyFilterList(state.display[cat.key]));
   else if (cat.type === 'raw')    renderRaw(body, state.results.rawText);
   else if (cat.type === 'images') renderGallery(body, state.results.images);
   else if (cat.type === 'tables') renderTables(body, state.results.tables);
@@ -1364,8 +1436,8 @@ function buildOutputControls(cat) {
   const actions = el('div', { className: 'panel-actions' });
 
   if (cat.type === 'list' || cat.type === 'raw') {
-    // Exports are values-only (no location column) — the location is on-screen.
-    const getItems = () => cat.type === 'raw' ? [state.results.rawText] : state.display[cat.key].map(d => d.value);
+    // Exports are values-only (no location column) and honour the active filter.
+    const getItems = () => cat.type === 'raw' ? [state.results.rawText] : applyFilterList(state.display[cat.key]).map(d => d.value);
 
     actions.append(el('button', {
       className: 'btn btn-secondary sm', textContent: 'Copy All',
@@ -1424,9 +1496,12 @@ function renderList(body, items) {
   head.append(el('span', { className: 'h-val', textContent: 'Value' }));
   head.append(el('span', { textContent: 'Found at' }));
   kv.append(head);
+  const filter = getFilter();
   items.forEach((item) => {
     const row = el('div', { className: 'kv-row' });
-    row.append(el('span', { className: 'kv-val', textContent: item.value }));
+    const val = el('span', { className: 'kv-val' });
+    appendHighlighted(val, item.value, filter);
+    row.append(val);
     row.append(locCell(item, 'kv-loc'));
     kv.append(row);
   });
@@ -1464,6 +1539,7 @@ function renderParameters(body, items) {
     const rows = parsed.slice();
     if (ps.col === 'value')      rows.sort((a, b) => (a.num - b.num) * ps.dir);
     else if (ps.col === 'unit')  rows.sort((a, b) => (a.unit.localeCompare(b.unit, undefined, { sensitivity: 'base' }) || (a.num - b.num)) * ps.dir);
+    else if (ps.col === 'loc')   rows.sort((a, b) => (a.index - b.index) * ps.dir); // document position
     // else: leave in the order applyListOptions produced (source order / A–Z)
 
     const arrow = (c) => ps.col === c ? (ps.dir > 0 ? ' ▲' : ' ▼') : '';
@@ -1471,16 +1547,18 @@ function renderParameters(body, items) {
     const thead = el('thead'); const htr = el('tr');
     const thVal  = el('th', { className: 'sortable', textContent: 'Value' + arrow('value'), title: 'Sort by value' });
     const thUnit = el('th', { className: 'sortable', textContent: 'Unit' + arrow('unit'), title: 'Sort A–Z by unit' });
-    const thLoc  = el('th', { textContent: 'Found at' });
+    const thLoc  = el('th', { className: 'sortable', textContent: 'Found at' + arrow('loc'), title: 'Sort by position in the document' });
     thVal.onclick  = () => setSort('value');
     thUnit.onclick = () => setSort('unit');
+    thLoc.onclick  = () => setSort('loc');
     htr.append(thVal, thUnit, thLoc); thead.append(htr); table.append(thead);
 
     const tbody = el('tbody');
+    const filter = getFilter();
     rows.forEach((r) => {
       const tr = el('tr');
-      tr.append(el('td', { className: 'p-num', textContent: r.numStr }));
-      tr.append(el('td', { className: 'p-unit', textContent: r.unit }));
+      const numTd = el('td', { className: 'p-num' }); appendHighlighted(numTd, r.numStr, filter); tr.append(numTd);
+      const unitTd = el('td', { className: 'p-unit' }); appendHighlighted(unitTd, r.unit, filter); tr.append(unitTd);
       const td = el('td'); td.append(locCell(r, 'p-loc')); tr.append(td);
       tbody.append(tr);
     });
@@ -1526,7 +1604,39 @@ function showOccurrences(anchor, item) {
 }
 
 function renderRaw(body, text) {
-  body.append(el('pre', { className: 'raw', textContent: text || '(empty)' }));
+  const filter = getFilter();
+  const pre = el('pre', { className: 'raw' });
+  const marks = [];
+  appendHighlighted(pre, text || '(empty)', filter, marks);
+
+  if (filter) {
+    // A little nav bar to jump between matches in the (possibly long) text.
+    const nav = el('div', { className: 'raw-nav' });
+    const counter = el('span', { className: 'raw-count' });
+    nav.append(counter);
+    if (marks.length) {
+      let cur = -1;
+      const go = (i) => {
+        if (cur >= 0) marks[cur].classList.remove('cur');
+        cur = (i + marks.length) % marks.length;
+        const mk = marks[cur]; mk.classList.add('cur');
+        pre.scrollTop = mk.offsetTop - pre.clientHeight / 2;   // centre the match in the box
+        counter.textContent = (cur + 1) + ' / ' + marks.length + ' matches';
+      };
+      const prev = el('button', { className: 'btn btn-secondary sm', textContent: '‹', title: 'Previous match' });
+      const next = el('button', { className: 'btn btn-secondary sm', textContent: '›', title: 'Next match' });
+      prev.onclick = () => go(cur - 1);
+      next.onclick = () => go(cur + 1);
+      nav.append(prev, next);
+      body.append(nav);
+      body.append(pre);
+      go(0); // jump to the first match
+      return;
+    }
+    counter.textContent = 'No matches in the text';
+    body.append(nav);
+  }
+  body.append(pre);
 }
 
 function renderGallery(body, images) {
@@ -1601,32 +1711,28 @@ function openLightbox(images, startIdx) {
 }
 
 function renderTables(body, tables) {
-  // Master/detail: a searchable list of tables on the left, the selected table
-  // shown on the right (one at a time).
+  // Master/detail: a list of tables on the left, the selected table on the right.
+  // The global filter hides tables with no match and highlights matches in the
+  // table shown.
+  const filter = getFilter();
+  const visible = tables.map((t, i) => ({ t, i })).filter(({ t }) => tableMatches(t, filter));
+
   const layout = el('div', { className: 'tbl-layout' });
   const side = el('div', { className: 'tbl-side' });
-  const search = el('input', { className: 'tbl-search', type: 'search', placeholder: '🔍  Search tables…' });
-  search.value = state.tableQuery || '';
   const listEl = el('div', { className: 'tbl-list' });
-  side.append(search, listEl);
+  side.append(listEl);
   const detail = el('div', { className: 'tbl-detail' });
   layout.append(side, detail);
   body.append(layout);
 
-  // "Relatively intelligent" match: strip case + everything non-alphanumeric, so
-  // "lo l" matches "lol" and "711364" matches "$7,113.64".
-  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
-  const contents = tables.map(t => norm(t.name + ' ' + t.rows.map(r => (Array.isArray(r) ? r : [r]).join(' ')).join(' ')));
-
-  let sel = Math.min(Math.max(state.tableSel || 0, 0), tables.length - 1);
+  // Keep the selection on a visible table.
+  let sel = state.tableSel;
+  if (!visible.some(v => v.i === sel)) sel = visible.length ? visible[0].i : -1;
 
   function paintList() {
     listEl.innerHTML = '';
-    const q = norm(search.value);
-    let shown = 0;
-    tables.forEach((t, i) => {
-      if (q && !contents[i].includes(q)) return; // filter: only tables containing the text
-      shown++;
+    if (!visible.length) { listEl.append(el('div', { className: 'tbl-empty', textContent: 'No tables match the filter.' })); return; }
+    visible.forEach(({ t, i }) => {
       const item = el('button', { className: 'tbl-item' + (i === sel ? ' active' : '') });
       item.append(el('span', { className: 'tbl-item-name', textContent: t.name }));
       const loc = pageLocation(t.source, t.page);
@@ -1634,23 +1740,21 @@ function renderTables(body, tables) {
       item.onclick = () => { sel = i; state.tableSel = i; paintList(); paintDetail(); };
       listEl.append(item);
     });
-    if (!shown) listEl.append(el('div', { className: 'tbl-empty', textContent: q ? 'No tables contain “' + search.value.trim() + '”.' : 'No tables.' }));
   }
 
   function paintDetail() {
     detail.innerHTML = '';
-    const t = tables[sel];
-    if (!t) { detail.append(el('div', { className: 'empty', textContent: 'Select a table from the list.' })); return; }
-    detail.append(renderOneTable(t, sel));
+    if (sel < 0) { detail.append(el('div', { className: 'empty', textContent: 'No table to show.' })); return; }
+    detail.append(renderOneTable(tables[sel], sel, filter));
   }
 
-  search.addEventListener('input', () => { state.tableQuery = search.value; paintList(); });
   paintList();
   paintDetail();
 }
 
-// Render a single table (header + copy/download + scrollable grid).
-function renderOneTable(t, ti) {
+// Render a single table (header + copy/download + scrollable grid). When a filter
+// is active, matching cell text is highlighted.
+function renderOneTable(t, ti, filter) {
   const wrap = el('div', { className: 'tbl-wrap' });
   const head = el('div', { className: 'tbl-head' });
   const title = el('span', { className: 'tname', textContent: t.name });
@@ -1670,7 +1774,11 @@ function renderOneTable(t, ti) {
   const table = el('table', { className: 'data' });
   t.rows.slice(0, 500).forEach((r) => { // cap render at 500 rows for responsiveness
     const tr = el('tr');
-    (Array.isArray(r) ? r : [r]).forEach((c) => tr.append(el('td', { textContent: c == null ? '' : String(c) })));
+    (Array.isArray(r) ? r : [r]).forEach((c) => {
+      const td = el('td');
+      appendHighlighted(td, c == null ? '' : String(c), filter);
+      tr.append(td);
+    });
     table.append(tr);
   });
   scroll.append(table);
@@ -1827,6 +1935,24 @@ $('#clearBtn').addEventListener('click', () => {
 
 /* options re-run extraction without re-parsing files */
 ['#optDedupe', '#optSort'].forEach(sel => $(sel).addEventListener('change', recompute));
+
+/* global filter — no re-parse, just re-render pills (matching counts) + panel */
+let filterDebounce;
+$('#globalFilter').addEventListener('input', (e) => {
+  clearTimeout(filterDebounce);
+  filterDebounce = setTimeout(() => {
+    state.filter = e.target.value;
+    updateFilterInfo();
+    renderPills();
+    renderPanel();
+  }, 150);
+});
+function updateFilterInfo() {
+  const info = $('#filterInfo');
+  if (!getFilter() || !state.results) { info.textContent = ''; return; }
+  const hits = CATEGORIES.filter(c => countOf(c.key) > 0).length;
+  info.textContent = hits ? `Filtering — ${hits} categor${hits === 1 ? 'y' : 'ies'} with matches` : 'No matches anywhere';
+}
 
 /* tab switching (General / Engineering) — just re-renders, no re-parse */
 $('#tabs').addEventListener('click', (e) => {
