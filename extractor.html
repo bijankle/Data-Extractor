@@ -474,7 +474,8 @@
   .tbl-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
   .tbl-head .tname { font-weight: 700; color: var(--text-primary); font-size: 13px; }
   .tbl-scroll { overflow: auto; border: 1px solid var(--border); border-radius: var(--r-card); max-height: 460px; }
-  table.data { border-collapse: collapse; width: 100%; font-size: 11.5px; line-height: 1.25; }
+  /* width:auto so each column hugs its longest cell (no stretched dead space) */
+  table.data { border-collapse: collapse; width: auto; max-width: 100%; font-size: 11.5px; line-height: 1.25; }
   table.data td, table.data th { border: 1px solid var(--hairline); padding: 2px 6px; text-align: left; white-space: nowrap; color: var(--text-primary); }
   table.data tr:first-child td { background: var(--n2); font-weight: 700; position: sticky; top: 0; }
 
@@ -993,7 +994,10 @@ function gapColumns(rowItems) {
     for (const it of r) { const a = Math.max(0, Math.floor((it.x - minX) / BIN)), b = Math.ceil((it.right - minX) / BIN); for (let i = a; i < b && i < nb; i++) mk[i] = 1; }
     for (let i = 0; i < nb; i++) cov[i] += mk[i];
   }
-  const thr = Math.max(1, nr * 0.12), minGap = Math.ceil(8 / BIN), seps = [];
+  // A separator is a band empty in most rows. The 0.30 threshold lets a gap that
+  // is only bridged by a column-spanning header (e.g. "Connected Load" sitting
+  // over the kW and P.F. columns) still count as a real column boundary.
+  const thr = Math.max(1, nr * 0.30), minGap = Math.ceil(8 / BIN), seps = [];
   let i = 0;
   while (i < nb) {
     if (cov[i] < thr) { let j = i; while (j < nb && cov[j] < thr) j++; if (j - i >= minGap) seps.push(minX + ((i + j) / 2) * BIN); i = j; }
@@ -1007,6 +1011,14 @@ function assignToColumns(items, ranges) {
   const out = ranges.map(() => []);
   for (const it of items) { let ci = ranges.findIndex(([a, b]) => it.x >= a && it.x < b); if (ci < 0) ci = ranges.length - 1; out[ci].push(it); }
   return out.map(a => a.sort((p, q) => p.x - q.x).map(t => t.s).join(' ').trim());
+}
+// Remove columns that are empty in every row (pure gap artifacts).
+function dropEmptyColumns(grid) {
+  if (!grid.length) return grid;
+  const nc = Math.max(...grid.map(r => r.length));
+  const keep = [];
+  for (let c = 0; c < nc; c++) if (grid.some(r => r[c])) keep.push(c);
+  return keep.length === nc ? grid : grid.map(r => keep.map(c => r[c] || ''));
 }
 
 /*
@@ -1071,7 +1083,7 @@ function extractPdfTables(content, viewport) {
     if (!numeric) continue;
     // Friendly name from the block's raw rows (which still include the caption).
     const name = deriveTableName(bl.rows.slice(0, 6).map(r => r.its.map(t => t.s)));
-    tables.push({ rows: grid, name });
+    tables.push({ rows: dropEmptyColumns(grid), name });
   }
   return tables;
 }
