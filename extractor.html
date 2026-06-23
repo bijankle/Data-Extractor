@@ -97,9 +97,9 @@
   }
 
   .wrap {
-    max-width: 1040px;
+    max-width: 1500px;
     margin: 0 auto;
-    padding: 18px 24px 60px;
+    padding: 18px 28px 60px;
   }
 
   /* ---- Header ---------------------------------------------------------- */
@@ -107,7 +107,7 @@
     display: flex;
     align-items: baseline;
     gap: 12px;
-    margin-bottom: 2px;
+    margin-bottom: 12px;
   }
   header.app h1 {
     font-size: 20px;
@@ -167,11 +167,11 @@
   }
   .dropzone textarea {
     width: 100%;
-    min-height: 84px;
+    min-height: 40px;
     resize: vertical;
     border: none;
     background: transparent;
-    padding: 12px 14px;
+    padding: 9px 14px;
     font-family: var(--font);
     font-size: 14px;
     color: var(--text-primary);
@@ -303,13 +303,15 @@
   /* ---- Options + Global filter (one compact row) ----------------------- */
   .controlrow { display: flex; align-items: center; gap: 16px 22px; flex-wrap: wrap; }
   .controlrow .options { flex: none; }
-  .controlrow .filterbar { flex: 1; min-width: 260px; margin: 0; }
+  .controlrow .filterbar { flex: 1; min-width: 260px; margin: 0; position: relative; }
+  .filter-icon { position: absolute; left: 12px; top: 9px; width: 18px; height: 18px; color: var(--faint-2); pointer-events: none; }
   .filter-input {
-    width: 100%; height: 38px; padding: 0 14px;
+    width: 100%; height: 38px; padding: 0 14px 0 38px;
     border: 1px solid #C7CAD1; border-radius: var(--r-btn);
     font-size: 13.5px; font-family: var(--font); color: var(--text-primary); background: #fff; outline: none;
   }
   .filter-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint-bg); }
+  .filter-input:focus + .filter-icon, .filterbar:focus-within .filter-icon { color: var(--muted); }
   .filter-info { display: block; font-size: 11.5px; color: var(--muted); margin-top: 4px; }
   .filter-info:empty { display: none; }
   mark.hl { background: #FFE9A8; color: inherit; border-radius: 3px; padding: 0 1px; }
@@ -319,6 +321,19 @@
   .raw-nav { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
   .raw-count { font-size: 12.5px; color: var(--muted); font-weight: 600; margin-right: 4px; }
   .raw-nav .btn { width: 34px; padding: 0; justify-content: center; font-size: 17px; }
+
+  /* "context" button + callout */
+  .ctx-btn {
+    border: 1px solid var(--accent-tint-border); background: var(--accent-tint-bg); color: var(--accent-deep);
+    font-family: var(--font); font-size: 10.5px; font-weight: 700; letter-spacing: .3px;
+    padding: 1px 7px; border-radius: var(--r-pill); cursor: pointer; vertical-align: middle;
+  }
+  .ctx-btn:hover { background: #E3E7FD; }
+  .ctx-btn .ctx-n { opacity: .65; }
+  .ctx-loc { font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 7px; }
+  .ctx-sentence { font-size: 13px; color: var(--text-body); line-height: 1.5; }
+  .ctx-nav { display: flex; gap: 6px; margin-top: 10px; }
+  .ctx-nav .btn { width: 32px; padding: 0; justify-content: center; font-size: 16px; }
 
   /* ---- Tabs (General / Engineering) ------------------------------------ */
   .tabs { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--n1); margin-bottom: 12px; }
@@ -349,8 +364,8 @@
 
   /* Callout / popover listing every occurrence of a deduped value */
   .callout {
-    position: absolute; z-index: 60; min-width: 210px; max-width: 360px;
-    max-height: 300px; overflow: auto;
+    position: absolute; z-index: 60; min-width: 240px; max-width: 420px;
+    max-height: 320px; overflow: auto;
     background: #fff; border: 1px solid var(--border); border-radius: 10px;
     box-shadow: 0 10px 30px rgba(30,31,34,.14); padding: 11px 13px;
     animation: calloutIn .16s ease-out;
@@ -497,14 +512,13 @@
   <header class="app">
     <h1>Data Extractor</h1>
   </header>
-  <p class="privacy"><span class="dot"></span> 100% in your browser — nothing is uploaded. Libraries load from a CDN on first use only.</p>
 
   <!-- ============================ INPUT LAYER ============================ -->
   <p class="label">Input</p>
   <div class="dropzone card" id="dropzone" style="padding:0;">
-    <textarea id="paste" placeholder="Paste text here, or drop a file anywhere on this box…&#10;Supports: TXT, CSV, JSON, HTML, XML, MD, LOG, PDF, DOCX, XLSX"></textarea>
+    <textarea id="paste" placeholder="Paste text, or drop a file here — TXT, CSV, JSON, HTML, XML, MD, LOG, PDF, DOCX, XLSX (multiple OK, pooled)"></textarea>
     <div class="dz-footer">
-      <span class="dz-hint" id="dzHint">Drop files (multiple OK) or paste. Results are pooled.</span>
+      <span class="dz-hint" id="dzHint">Nothing is uploaded — runs entirely in your browser.</span>
       <div style="display:flex; gap:8px;">
         <button class="btn btn-secondary sm" id="browseBtn">Browse files…</button>
         <button class="btn btn-danger sm" id="clearBtn">Clear all</button>
@@ -520,11 +534,11 @@
   <!-- ============== OPTIONS + GLOBAL FILTER (one compact row) =========== -->
   <div class="card tight controlrow">
     <div class="options">
-      <label class="opt"><input type="checkbox" id="optDedupe" checked /><span class="toggle"></span> No duplicates (not case sensitive)</label>
-      <label class="opt"><input type="checkbox" id="optSort" /><span class="toggle"></span> Sort A–Z</label>
+      <label class="opt"><input type="checkbox" id="optDedupe" checked /><span class="toggle"></span> No duplicates</label>
     </div>
     <div class="filterbar">
-      <input id="globalFilter" class="filter-input" type="search" placeholder="🔍  Filter everything — only matches shown & highlighted" />
+      <svg class="filter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="globalFilter" class="filter-input" type="search" placeholder="Filter everything — only matches shown & highlighted" />
       <span id="filterInfo" class="filter-info"></span>
     </div>
   </div>
@@ -995,19 +1009,39 @@ function extractPdfTables(content, viewport) {
     else b = null;
   }
 
-  // 5. keep blocks with >=3 rows and a mostly-numeric column; prune sparse cols
+  // 5. keep blocks with >=3 rows and a mostly-numeric column; trim prose that
+  //    leaked in above/below the grid; prune sparse cols.
   const tables = [];
   for (const bl of blocks) {
-    if (bl.rows.length < 3) continue;
+    const core = trimTableRows(bl.rows);
+    if (core.length < 3) continue;
     let numeric = false;
     for (let ci = 0; ci < cols.length; ci++) {
-      const vals = bl.rows.map(r => r[ci]).filter(Boolean);
+      const vals = core.map(r => r[ci]).filter(Boolean);
       if (vals.length >= 3 && vals.filter(_isNumericCell).length / vals.length >= 0.4) { numeric = true; break; }
     }
     if (!numeric) continue;
-    tables.push(pruneSparseColumns(bl.rows));
+    tables.push(pruneSparseColumns(core));
   }
   return tables;
+}
+
+// Trim leading/trailing rows that are really prose (a wrapped sentence that flowed
+// above/below the grid), not table rows. A prose row has a cell that reads like a
+// sentence: many words, mostly lowercase. Table cells are values or Title-Case
+// labels, so they don't trip this. Only the ends are trimmed.
+function isProseRow(cells) {
+  for (const c of cells) {
+    if (!c) continue;
+    const words = c.trim().split(/\s+/);
+    if (words.length >= 6 && words.filter(w => /^[a-z]/.test(w)).length / words.length > 0.5) return true;
+  }
+  return false;
+}
+function trimTableRows(rows) {
+  let first = 0; while (first < rows.length && isProseRow(rows[first])) first++;
+  let last = rows.length - 1; while (last >= 0 && isProseRow(rows[last])) last--;
+  return (first > last) ? rows : rows.slice(first, last + 1);
 }
 
 // Drop columns that are filled in <20% of rows (e.g. a centered header sitting
@@ -1179,7 +1213,7 @@ const CATEGORIES = [
   { key: 'contact',   label: 'Contact Info', type: 'list', tab: 'general' },
   { key: 'links',     label: 'Links',   type: 'list',   tab: 'general' },
   { key: 'dates',     label: 'Dates',   type: 'list',   tab: 'general' },
-  { key: 'money',     label: 'Money',   type: 'list',   tab: 'general' },
+  { key: 'money',     label: 'Finance', type: 'list',   tab: 'general' },
   { key: 'images',    label: 'Images',  type: 'images', tab: 'general' },
   { key: 'tables',    label: 'Tables',  type: 'tables', tab: 'general' },
   { key: 'rawText',   label: 'Raw Text', type: 'raw',   tab: 'general' },
@@ -1267,6 +1301,7 @@ async function recompute() {
     combined += '\n'; // separator between sources
   }
   state.locator = { segments, total: Math.max(1, combined.length), multi: ready.length > 1 };
+  state.combined = combined; // kept so "context" can pull the surrounding sentence
 
   // Raw Text: collapse any run of 3+ line breaks down to 2, so there is never
   // more than a single empty row between two blocks of text.
@@ -1309,8 +1344,7 @@ function applyListOptions(arr) {
   } else {
     items = arr.map(it => ({ value: it.value, index: it.index, indices: [it.index] }));
   }
-  if ($('#optSort').checked) items.sort((a, b) => a.value.localeCompare(b.value, undefined, { sensitivity: 'base' }));
-  else items.sort((a, b) => a.index - b.index); // source order = document order
+  items.sort((a, b) => a.index - b.index); // default = source/document order (click headers to sort)
   return items;
 }
 
@@ -1349,14 +1383,34 @@ function pageLocation(source, page) {
    filtered out (per design): Raw Text just highlights + offers match navigation,
    Images always show.
    -------------------------------------------------------------------------- */
-function getFilter() {
-  const q = (state.filter || '').trim();
-  if (!q) return null;
-  const norm = q.toLowerCase().replace(/[^a-z0-9]/g, '');
+// Build a smart matcher from a query: case/space/punctuation-insensitive, so the
+// chars must appear in order with only non-alphanumerics between them.
+function buildMatcher(q) {
+  const norm = (q || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   if (!norm) return null;
-  // chars in order, allowing any non-alphanumerics between them
   const src = norm.split('').join('[^a-zA-Z0-9]*');
   return { src, test: (s) => new RegExp(src, 'i').test(s || '') };
+}
+function getFilter() { return buildMatcher((state.filter || '').trim()); }
+
+// Pull the sentence around a character offset in the combined text, for "context".
+function contextAround(index, matchLen) {
+  const text = state.combined || '';
+  if (!text) return '';
+  const winStart = Math.max(0, index - 180);
+  const winEnd = Math.min(text.length, index + matchLen + 180);
+  const snippet = text.slice(winStart, winEnd);
+  const rel = index - winStart;
+  // sentence start: last . ! ? (then space) or newline before the match
+  let s = 0; const before = snippet.slice(0, rel);
+  let mm, re = /[.!?]\s|\n/g; while ((mm = re.exec(before)) !== null) s = mm.index + mm[0].length;
+  // sentence end: first . ! ? (then space) or newline after the match
+  let e = snippet.length; const after = snippet.slice(rel);
+  const am = after.match(/[.!?](\s|$)|\n/); if (am) e = rel + am.index + 1;
+  let out = snippet.slice(s, e).replace(/\s+/g, ' ').trim();
+  if (winStart > 0 && s === 0) out = '… ' + out;
+  if (winEnd < text.length && e === snippet.length) out = out + ' …';
+  return out;
 }
 
 // Append `text` to `parent`, wrapping filter matches in <mark> (collected into
@@ -1469,44 +1523,27 @@ function buildOutputControls(cat) {
   const actions = el('div', { className: 'panel-actions' });
 
   if (cat.type === 'list' || cat.type === 'raw') {
-    // Exports are values-only (no location column) and honour the active filter.
+    // Exports are values-only and honour the active filter. Icon buttons:
+    // copy (to clipboard) + download (lists as CSV, raw text as TXT).
     const getItems = () => cat.type === 'raw' ? [state.results.rawText] : applyFilterList(state.display[cat.key]).map(d => d.value);
 
-    actions.append(el('button', {
-      className: 'btn btn-secondary sm', textContent: 'Copy All',
-      onclick: async () => {
+    actions.append(iconBtn('copy', cat.type === 'raw' ? 'Copy text to clipboard' : 'Copy all to clipboard',
+      async () => {
         await navigator.clipboard.writeText(getItems().join('\n'));
         toast('Copied ' + (cat.type === 'raw' ? 'text' : getItems().length + ' items') + ' to clipboard.', 'ok');
-      },
-    }));
+      }));
 
-    // format selector (TXT / CSV / JSON); raw text is TXT only
-    let fmt = 'txt';
-    if (cat.type === 'list') {
-      const sel = el('select', { className: 'fmt', onchange: (e) => fmt = e.target.value });
-      sel.append(el('option', { value: 'txt', textContent: 'TXT' }));
-      sel.append(el('option', { value: 'csv', textContent: 'CSV' }));
-      sel.append(el('option', { value: 'json', textContent: 'JSON' }));
-      actions.append(sel);
-    }
-
-    actions.append(el('button', {
-      className: 'btn btn-primary sm', textContent: 'Download',
-      onclick: () => {
+    actions.append(iconBtn('download', cat.type === 'raw' ? 'Download as TXT' : 'Download as CSV',
+      () => {
         const items = getItems();
-        if (cat.type === 'raw') return downloadText(items[0], cat.key + '.txt');
-        if (fmt === 'txt')  downloadText(items.join('\n'), cat.key + '.txt');
-        if (fmt === 'csv')  downloadText(toCsvColumn(cat.label, items), cat.key + '.csv');
-        if (fmt === 'json') downloadText(JSON.stringify(items, null, 2), cat.key + '.json');
-      },
-    }));
+        if (cat.type === 'raw') downloadText(items[0], 'raw-text.txt');
+        else downloadText(toCsvColumn(cat.label, items), cat.key + '.csv');
+      }, 'btn-primary'));
   }
 
   if (cat.type === 'images') {
-    actions.append(el('button', {
-      className: 'btn btn-primary sm', textContent: 'Download all (.zip)',
-      onclick: () => downloadImagesZip(state.results.images),
-    }));
+    actions.append(iconBtn('download', 'Download all images (.zip)',
+      () => downloadImagesZip(state.results.images), 'btn-primary'));
   }
 
   if (cat.type === 'tables') {
@@ -1561,16 +1598,18 @@ function renderList(body, items, key) {
   paint();
 }
 
-// A "Found at" cell/span: the first location + a clickable "(+N more)" that opens
-// the all-occurrences callout. Reused by the list and the Parameters table.
+// A "Found at" cell/span: the location, then a "context" button that opens a
+// callout showing the surrounding sentence (with arrows to step through every
+// occurrence). Reused by the list and the Parameters table.
 function locCell(item, className) {
-  const loc = el('span', { className, textContent: locate(item.index) });
-  const extra = item.indices.length - 1;
-  if (extra > 0) {
-    const more = el('span', { className: 'more more-link', textContent: '  (+' + extra + ' more)' });
-    more.addEventListener('click', (e) => { e.stopPropagation(); showOccurrences(more, item); });
-    loc.append(more);
-  }
+  const loc = el('span', { className });
+  loc.append(document.createTextNode(locate(item.index)));
+  const ctx = el('button', { className: 'ctx-btn', type: 'button' });
+  ctx.append('context');
+  if (item.indices.length > 1) ctx.append(el('span', { className: 'ctx-n', textContent: ' ·' + item.indices.length }));
+  ctx.addEventListener('click', (e) => { e.stopPropagation(); showContext(ctx, item); });
+  loc.append(document.createTextNode('  '));
+  loc.append(ctx);
   return loc;
 }
 
@@ -1626,27 +1665,43 @@ function renderParameters(body, items) {
   paint();
 }
 
-/* Popover listing every occurrence (location) of a deduped value. */
+/* "Context" popover: the surrounding sentence for a result, with arrows to step
+   through every occurrence of that value. */
 let openCallout = null;
 function closeCallout() {
   if (openCallout) { openCallout.remove(); openCallout = null; document.removeEventListener('click', closeCallout); window.removeEventListener('resize', closeCallout); }
 }
-function showOccurrences(anchor, item) {
+function showContext(anchor, item) {
   closeCallout();
+  const matcher = buildMatcher(item.value);            // highlight the value in the sentence
   const co = el('div', { className: 'callout' });
-  co.addEventListener('click', (e) => e.stopPropagation()); // clicks inside don't close it
+  co.addEventListener('click', (e) => e.stopPropagation());
   co.append(el('div', { className: 'callout-head', textContent: item.value }));
-  const list = el('div', { className: 'callout-list' });
-  item.indices.forEach((idx, i) => {
-    const r = el('div', { className: 'callout-row' });
-    r.append(el('span', { className: 'callout-idx', textContent: '#' + (i + 1) }));
-    r.append(el('span', { textContent: locate(idx) }));
-    list.append(r);
-  });
-  co.append(list);
+  const locLine = el('div', { className: 'ctx-loc' });
+  const sentence = el('div', { className: 'ctx-sentence' });
+  co.append(locLine, sentence);
+
+  let cur = 0;
+  const render = () => {
+    const idx = item.indices[cur];
+    locLine.textContent = locate(idx) + (item.indices.length > 1 ? '   ·   ' + (cur + 1) + ' / ' + item.indices.length : '');
+    sentence.textContent = '';
+    appendHighlighted(sentence, contextAround(idx, item.value.length), matcher);
+  };
+
+  if (item.indices.length > 1) {
+    const nav = el('div', { className: 'ctx-nav' });
+    const prev = el('button', { className: 'btn btn-secondary sm', textContent: '‹', title: 'Previous occurrence' });
+    const next = el('button', { className: 'btn btn-secondary sm', textContent: '›', title: 'Next occurrence' });
+    prev.onclick = (e) => { e.stopPropagation(); cur = (cur - 1 + item.indices.length) % item.indices.length; render(); };
+    next.onclick = (e) => { e.stopPropagation(); cur = (cur + 1) % item.indices.length; render(); };
+    nav.append(prev, next);
+    co.append(nav);
+  }
+  render();
   document.body.append(co);
 
-  // Position below the link, kept inside the viewport horizontally.
+  // Position below the button, kept inside the viewport horizontally.
   const a = anchor.getBoundingClientRect();
   const maxLeft = window.scrollX + document.documentElement.clientWidth - co.offsetWidth - 12;
   co.style.top = (window.scrollY + a.bottom + 6) + 'px';
@@ -1983,7 +2038,7 @@ $('#clearBtn').addEventListener('click', () => {
 });
 
 /* options re-run extraction without re-parsing files */
-['#optDedupe', '#optSort'].forEach(sel => $(sel).addEventListener('change', recompute));
+$('#optDedupe').addEventListener('change', recompute);
 
 /* global filter — no re-parse, just re-render pills (matching counts) + panel */
 let filterDebounce;
