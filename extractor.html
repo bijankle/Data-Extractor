@@ -270,18 +270,6 @@
   .opt input:checked + .toggle::after { transform: translateX(16px); }
   .opt input:disabled + .toggle { opacity: .45; }
 
-  /* custom pattern input */
-  .pattern-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 4px; }
-  .text-input {
-    height: 38px; padding: 0 12px;
-    border: 1px solid #C7CAD1; border-radius: var(--r-btn);
-    font-family: var(--mono); font-size: 13px; color: var(--text-primary);
-    background: #fff; outline: none; min-width: 240px; flex: 1;
-  }
-  .text-input:focus { border-color: var(--accent); }
-  .text-input.invalid { border-color: var(--danger); background: #FCEDED; }
-  .pattern-err { font-size: 12px; color: var(--danger); width: 100%; }
-
   /* ---- Category pills -------------------------------------------------- */
   .pills { display: flex; flex-wrap: wrap; gap: 9px; }
   .pill-btn {
@@ -430,11 +418,6 @@
       <label class="opt"><input type="checkbox" id="optSort" /><span class="toggle"></span> Sort A–Z</label>
       <label class="opt"><input type="checkbox" id="optIntl" /><span class="toggle"></span> Phones: International (loose)</label>
     </div>
-    <div class="pattern-row">
-      <label class="opt" style="margin-right:2px;"><input type="checkbox" id="optRegex" /><span class="toggle"></span> Regex</label>
-      <input type="text" class="text-input" id="patternInput" placeholder="Custom lens: type exact text/code to find (toggle Regex for patterns)" />
-      <span class="pattern-err hidden" id="patternErr"></span>
-    </div>
   </div>
 
   <!-- ============================ CATEGORIES =========================== -->
@@ -565,10 +548,6 @@ const PATTERNS = {
     re: /\b(?:https?:\/\/|www\.)[^\s"'<>)\]}]+/gi,
     clean: (s) => s.replace(/[.,;:!?'")\]]+$/, ''), // strip trailing sentence punctuation
   },
-  ips: {
-    // IPv4 with valid octets
-    re: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g,
-  },
   dates: {
     re: new RegExp([
       '\\b\\d{4}-\\d{2}-\\d{2}\\b',                                   // 2024-06-23 (ISO)
@@ -655,11 +634,19 @@ async function parsePdf(file, beat = () => {}) {
   await ensurePdfjs();
   beat();
   const data = await readAsArrayBuffer(file);
-  const pdf = await window.pdfjsLib.getDocument({ data }).promise;
+  let pdf;
+  try {
+    pdf = await window.pdfjsLib.getDocument({ data }).promise;
+  } catch (e) {
+    if (e && e.name === 'PasswordException') throw new Error('This PDF is password-protected and can’t be opened.');
+    throw e;
+  }
   beat();
   let text = '';
   const images = [];
+  const tables = [];
   const seen = new Set();
+  const baseName = file.name.replace(/\.pdf$/i, '');
 
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
@@ -669,6 +656,14 @@ async function parsePdf(file, beat = () => {}) {
     const content = await page.getTextContent();
     text += content.items.map(i => i.str).join(' ') + '\n';
 
+    // --- tables: reconstruct from text geometry (positions) ---
+    try {
+      const viewport = page.getViewport({ scale: 1 });
+      extractPdfTables(content, viewport).forEach((rows, ti) => {
+        tables.push({ name: `${baseName} — p${p} table ${ti + 1}`, rows });
+      });
+    } catch (_) { /* table reconstruction is best-effort */ }
+
     // --- embedded images: walk the operator list for image paints ---
     try {
       const ops = await page.getOperatorList();
@@ -677,10 +672,13 @@ async function parsePdf(file, beat = () => {}) {
         const fn = ops.fnArray[i];
         if (fn === OPS.paintImageXObject || fn === OPS.paintJpegXObject || fn === OPS.paintImageXObjectRepeat) {
           const objName = ops.argsArray[i][0];
-          const key = p + ':' + objName;
+          // 'g_'-prefixed images are global (shared across pages) — dedupe by name
+          // alone so we don't grab the same logo on every page.
+          const key = objName.startsWith('g_') ? objName : (p + ':' + objName);
           if (seen.has(key)) continue;
           seen.add(key);
           const blob = await pdfImageToBlob(page, objName);
+          beat(); // image decode is progress
           if (blob) images.push({ name: `p${p}-${objName}.png`, blob });
         }
       }
@@ -692,17 +690,121 @@ async function parsePdf(file, beat = () => {}) {
   if (!text.trim() && pdf.numPages > 0) {
     toast('This PDF has no extractable text layer (it may be scanned images). OCR is not included in v1.', 'warn', file.name);
   }
-  return { sieveText: text, displayText: text.trim(), images, tables: [] };
+  return { sieveText: text, displayText: text.trim(), images, tables };
+}
+
+/*
+  Reconstruct tables from a PDF page's text geometry. PDFs have no "table"
+  concept in the text layer — only positioned text — so this is heuristic:
+    1. Group text items into rows by their Y position.
+    2. Find recurring X "column anchors" (x-starts shared by several rows).
+    3. Assign each row's items to the nearest column.
+    4. Keep only runs of >=3 consecutive multi-column rows that contain at
+       least one mostly-numeric column. That numeric guard is what separates a
+       real data table (invoice line items, prices) from multi-column prose,
+       which would otherwise masquerade as a table.
+  It will miss borderless or irregular tables — full reconstruction is hard —
+  but reliably catches clean grids like quotes/invoices.
+*/
+const _isNumericCell = (s) => /^[-+(]?\$?\s?\d[\d,]*\.?\d*\)?%?$/.test(s.trim());
+function extractPdfTables(content, viewport) {
+  const items = content.items
+    .filter(i => i.str.trim())
+    .map(i => ({ s: i.str.trim(), x: Math.round(i.transform[4]), y: Math.round(viewport.height - i.transform[5]) }));
+  if (items.length < 6) return [];
+
+  // 1. rows by Y (3px tolerance)
+  items.sort((a, b) => a.y - b.y || a.x - b.x);
+  const rows = [];
+  let cur = null;
+  for (const it of items) {
+    if (!cur || Math.abs(it.y - cur.y) > 3) { cur = { y: it.y, cells: [it] }; rows.push(cur); }
+    else cur.cells.push(it);
+  }
+
+  // 2. column anchors: cluster x-starts (22px) appearing in >=3 rows
+  const xs = [];
+  for (const r of rows) if (r.cells.length >= 2) for (const c of r.cells) xs.push(c.x);
+  xs.sort((a, b) => a - b);
+  const clusters = [];
+  for (const x of xs) {
+    const last = clusters[clusters.length - 1];
+    if (last && x - last.sum / last.n <= 22) { last.sum += x; last.n++; }
+    else clusters.push({ sum: x, n: 1 });
+  }
+  const cols = clusters.filter(c => c.n >= 3).map(c => Math.round(c.sum / c.n)).sort((a, b) => a - b);
+  if (cols.length < 2) return [];
+
+  // 3. map each row into columns (nearest anchor wins)
+  const toCols = (r) => {
+    const out = new Array(cols.length).fill('');
+    for (const c of r.cells) {
+      let bi = 0, bd = Infinity;
+      cols.forEach((cx, i) => { const d = Math.abs(c.x - cx); if (d < bd) { bd = d; bi = i; } });
+      out[bi] = out[bi] ? out[bi] + ' ' + c.s : c.s;
+    }
+    return out;
+  };
+  const mapped = rows.map(r => ({ y: r.y, cells: toCols(r), filled: 0 }));
+  mapped.forEach(m => m.filled = m.cells.filter(Boolean).length);
+
+  // 4. group consecutive multi-column rows (Y gap <= 20px) into blocks
+  const blocks = [];
+  let b = null;
+  for (const m of mapped) {
+    if (m.filled >= 2) { if (b && m.y - b.lastY <= 20) { b.rows.push(m.cells); b.lastY = m.y; } else { b = { rows: [m.cells], lastY: m.y }; blocks.push(b); } }
+    else b = null;
+  }
+
+  // 5. keep blocks with >=3 rows and a mostly-numeric column; prune sparse cols
+  const tables = [];
+  for (const bl of blocks) {
+    if (bl.rows.length < 3) continue;
+    let numeric = false;
+    for (let ci = 0; ci < cols.length; ci++) {
+      const vals = bl.rows.map(r => r[ci]).filter(Boolean);
+      if (vals.length >= 3 && vals.filter(_isNumericCell).length / vals.length >= 0.4) { numeric = true; break; }
+    }
+    if (!numeric) continue;
+    tables.push(pruneSparseColumns(bl.rows));
+  }
+  return tables;
+}
+
+// Drop columns that are filled in <20% of rows (e.g. a centered header sitting
+// between data columns), merging any stray text into the nearest kept column.
+function pruneSparseColumns(rows) {
+  const nCols = Math.max(...rows.map(r => r.length));
+  const keep = [];
+  for (let c = 0; c < nCols; c++) {
+    const filled = rows.filter(r => r[c]).length;
+    if (filled / rows.length >= 0.2) keep.push(c);
+  }
+  if (keep.length === nCols || keep.length === 0) return rows;
+  const nearestKept = (c) => keep.reduce((best, k) => Math.abs(k - c) < Math.abs(best - c) ? k : best, keep[0]);
+  return rows.map(r => {
+    const merged = {};
+    r.forEach((val, c) => {
+      if (!val) return;
+      const target = keep.includes(c) ? c : nearestKept(c);
+      merged[target] = merged[target] ? merged[target] + ' ' + val : val;
+    });
+    return keep.map(c => merged[c] || '');
+  });
 }
 
 // Pull one image object out of a PDF page and convert it to a PNG blob.
+// Returns null (rather than hanging) if the object can't be resolved.
 function pdfImageToBlob(page, objName) {
   return new Promise((resolve) => {
-    const handle = (img) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+
+    const toBlob = (img) => {
       try {
-        if (!img) return resolve(null);
+        if (!img) return finish(null);
         const w = img.width, h = img.height;
-        if (!w || !h || w * h < 64) return resolve(null); // skip 1px spacers / junk
+        if (!w || !h || w * h < 64) return finish(null); // skip 1px spacers / junk
         const canvas = el('canvas'); canvas.width = w; canvas.height = h;
         const ctx = canvas.getContext('2d');
         if (img.bitmap) {
@@ -712,16 +814,25 @@ function pdfImageToBlob(page, objName) {
           const d = img.data, n = w * h;
           if (d.length === n * 4)      { out.data.set(d); }                                   // RGBA
           else if (d.length === n * 3) { for (let i=0,j=0;i<d.length;i+=3,j+=4){ out.data[j]=d[i]; out.data[j+1]=d[i+1]; out.data[j+2]=d[i+2]; out.data[j+3]=255; } } // RGB
-          else if (d.length === n)     { for (let i=0,j=0;i<n;i++,j+=4){ out.data[j]=out.data[j+1]=out.data[j+2]=d[i]; out.data[j+3]=255; } } // grayscale
-          else return resolve(null);
+          else if (d.length === n)     { for (let i=0,j=0;i<n;i++,j+=4){ out.data[j]=out.data[j+1]=out.data[j+2]=d[i]; out.data[j+3]=255; } } // grayscale (8bpp)
+          else return finish(null);                                                           // packed/other => skip
           ctx.putImageData(out, 0, 0);
-        } else return resolve(null);
-        canvas.toBlob((b) => resolve(b), 'image/png');
-      } catch (_) { resolve(null); }
+        } else return finish(null);
+        canvas.toBlob((b) => finish(b), 'image/png');
+      } catch (_) { finish(null); }
     };
-    // image objects live on page.objs; resolve via callback when ready
-    try { page.objs.get(objName, handle); }
-    catch (_) { resolve(null); }
+
+    // Per-image safety timeout: some objects (e.g. inside forms) never resolve via
+    // the callback. Without this, the await would hang the whole parse forever.
+    setTimeout(() => finish(null), 4000);
+
+    try {
+      // 'g_'-prefixed names are GLOBAL objects on page.commonObjs; everything else
+      // is on page.objs. Calling the wrong store's get() never fires its callback.
+      const store = objName.startsWith('g_') ? page.commonObjs : page.objs;
+      if (store.has(objName)) toBlob(store.get(objName)); // already decoded: sync
+      else store.get(objName, toBlob);                    // otherwise: async callback
+    } catch (_) { finish(null); }
   });
 }
 
@@ -801,16 +912,14 @@ const state = {
   active: 'rawText',    // currently selected category
 };
 
-// Definition of every category lens. `kind`: 'text' sieve, 'list' (custom),
-// 'raw' text, or 'structure' (images/tables).
+// Definition of every category lens. `type`: 'list' (text sieve results),
+// 'raw' text, or structure lenses ('images'/'tables').
+// Contact Info merges emails + phones into a single lens.
 const CATEGORIES = [
-  { key: 'emails',  label: 'Emails',  type: 'list' },
+  { key: 'contact', label: 'Contact Info', type: 'list' },
   { key: 'links',   label: 'Links',   type: 'list' },
-  { key: 'phones',  label: 'Phones',  type: 'list' },
-  { key: 'ips',     label: 'IPs',     type: 'list' },
   { key: 'dates',   label: 'Dates',   type: 'list' },
   { key: 'money',   label: 'Money',   type: 'list' },
-  { key: 'custom',  label: 'Custom',  type: 'list' },
   { key: 'images',  label: 'Images',  type: 'images' },
   { key: 'tables',  label: 'Tables',  type: 'tables' },
   { key: 'rawText', label: 'Raw Text', type: 'raw' },
@@ -818,11 +927,11 @@ const CATEGORIES = [
 
 /* ----- run all text sieves over the merged text, chunked to stay smooth --- */
 async function runSieves(text) {
-  const out = { emails: [], links: [], phones: [], ips: [], dates: [], money: [], custom: [] };
-  if (!text) return out;
+  // emails + phones are collected separately then merged into `contact`.
+  const emails = [], phones = [], links = [], dates = [], money = [];
+  if (!text) return { contact: [], links, dates, money };
 
   const phoneRe = $('#optIntl').checked ? PHONE_INTL : PHONE_AU;
-  const customRe = buildCustomRegex(); // may be null
 
   // Chunk by lines so we can yield to the UI on big inputs. The built-in
   // patterns are all single-line, so line-chunking never splits a match.
@@ -831,17 +940,16 @@ async function runSieves(text) {
   for (let i = 0; i < lines.length; i += CHUNK) {
     const seg = lines.slice(i, i + CHUNK).join('\n');
 
-    collect(out.emails, seg, PATTERNS.emails);
-    collect(out.links,  seg, PATTERNS.links);
-    collect(out.ips,    seg, PATTERNS.ips);
-    collect(out.dates,  seg, PATTERNS.dates);
-    collect(out.money,  seg, PATTERNS.money);
-    collectRe(out.phones, seg, phoneRe);
-    if (customRe) collectRe(out.custom, seg, customRe);
+    collect(emails, seg, PATTERNS.emails);
+    collect(links,  seg, PATTERNS.links);
+    collect(dates,  seg, PATTERNS.dates);
+    collect(money,  seg, PATTERNS.money);
+    collectRe(phones, seg, phoneRe);
 
     if (lines.length > CHUNK) await microYield();
   }
-  return out;
+  // Contact Info = emails first, then phone numbers.
+  return { contact: [...emails, ...phones], links, dates, money };
 }
 
 function collect(bucket, text, pattern) {
@@ -855,32 +963,6 @@ function collectRe(bucket, text, re) {
   for (let s of m) { s = s.trim(); if (s && s.replace(/\D/g, '').length >= 6) bucket.push(s); }
 }
 
-// Build the custom-lens regex from the input + Regex toggle.
-function buildCustomRegex() {
-  const raw = $('#patternInput').value;
-  if (!raw) { setPatternError(''); return null; }
-  try {
-    let re;
-    if ($('#optRegex').checked) {
-      re = new RegExp(raw, 'gi');
-    } else {
-      // Plain mode: escape everything, match the literal string.
-      const esc = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      re = new RegExp(esc, 'gi');
-    }
-    setPatternError('');
-    return re;
-  } catch (e) {
-    setPatternError('Invalid regex: ' + e.message);
-    return null;
-  }
-}
-function setPatternError(msg) {
-  const err = $('#patternErr'), inp = $('#patternInput');
-  if (msg) { err.textContent = msg; err.classList.remove('hidden'); inp.classList.add('invalid'); }
-  else { err.classList.add('hidden'); inp.classList.remove('invalid'); }
-}
-
 /* ----- merge pool -> run extraction -> render --------------------------- */
 let recomputeToken = 0;
 async function recompute() {
@@ -888,7 +970,11 @@ async function recompute() {
 
   const ready = state.sources.filter(s => s.status === 'ok');
   const sieveText   = ready.map(s => s.sieveText).join('\n\n');
-  const displayText = ready.map(s => s.displayText).filter(Boolean).join('\n\n— — —\n\n');
+  // Raw Text: collapse any run of 3+ line breaks down to 2, so there is never
+  // more than a single empty row between two blocks of text.
+  const displayText = ready.map(s => s.displayText).filter(Boolean).join('\n\n— — —\n\n')
+                        .replace(/[ \t]+\n/g, '\n')   // trim trailing spaces on lines
+                        .replace(/\n{3,}/g, '\n\n');   // max one blank line between blocks
   const images = ready.flatMap(s => s.images);
   const tables = ready.flatMap(s => s.tables);
 
@@ -1218,9 +1304,7 @@ $('#clearBtn').addEventListener('click', () => {
 });
 
 /* options re-run extraction without re-parsing files */
-['#optDedupe', '#optSort', '#optIntl', '#optRegex'].forEach(sel => $(sel).addEventListener('change', recompute));
-let patternDebounce;
-$('#patternInput').addEventListener('input', () => { clearTimeout(patternDebounce); patternDebounce = setTimeout(recompute, 150); });
+['#optDedupe', '#optSort', '#optIntl'].forEach(sel => $(sel).addEventListener('change', recompute));
 
 // first paint
 renderPills();
