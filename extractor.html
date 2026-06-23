@@ -340,6 +340,17 @@
   .kv-head span { font-size: 11px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; color: var(--muted); }
   .kv-head .h-val { flex: 1; }
 
+  /* Parameters lens — sortable value/unit table */
+  table.ptable { border-collapse: collapse; width: 100%; font-size: 13px; border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; }
+  table.ptable th, table.ptable td { padding: 8px 12px; text-align: left; border-top: 1px solid var(--hairline); }
+  table.ptable thead th { background: var(--n2); color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; border-top: none; white-space: nowrap; }
+  table.ptable thead th.sortable { cursor: pointer; user-select: none; }
+  table.ptable thead th.sortable:hover { color: var(--text-body); background: var(--n3); }
+  table.ptable tbody tr:nth-child(even) td { background: var(--n1); }
+  table.ptable .p-num { font-family: var(--mono); font-weight: 600; color: var(--text-primary); text-align: right; white-space: nowrap; width: 1%; }
+  table.ptable .p-unit { font-family: var(--mono); color: var(--text-body); white-space: nowrap; }
+  table.ptable .p-loc { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+
   /* ---- Results panel --------------------------------------------------- */
   .panel-head {
     display: flex; align-items: center; justify-content: space-between;
@@ -694,19 +705,7 @@ const ENG = {
   // Standards & Codes: AS2419.1, AS/NZS 3000, ISO 9001, IEC 61511, ASME B31.3…
   // The optional [A-Z]{0,2} before the digits catches lettered codes (B31.3, Z535).
   standards: {
-    re: /\b(?:AS\/NZS|ISO\/IEC|AS|ISO|IEC|IEEE|ASME|ASTM|API|ANSI|NFPA|DIN|EN|BS|NACE|AWS|NZS|SAA)\s?[A-Z]{0,2}\d+(?:[.\-]\d+)*(?:\s?:\s?\d{4})?\b/g,
-  },
-  // Document numbers: 3+ alphanumeric groups joined by hyphens (PID-PR-K-132-0001).
-  // Must contain at least one letter (so ISO dates like 2024-06-23 are excluded).
-  docnums: {
-    re: /\b[A-Z0-9]{1,6}(?:-[A-Z0-9]{1,6}){2,}\b/g,
-    keep: (s) => /[A-Za-z]/.test(s),
-  },
-  // Equipment & tag numbers: letter prefix + dash + number + optional suffix
-  // (P-101A, VLV-202, HE-301). Lookarounds stop it grabbing pieces of a longer
-  // hyphenated document number.
-  tags: {
-    re: /(?<![\w-])[A-Z]{1,4}-\d{2,4}[A-Z]?(?![\w-])/g,
+    re: /\b(?:AS\/NZS|ISO\/IEC|AS|ISO|IEC|IEEE|ASME|ASTM|API|ANSI|AHRI|NFPA|DIN|EN|BS|NACE|AWS|NZS|SAA)\s?[A-Z]{0,2}\d+(?:[.\-]\d+)*(?:\s?:\s?\d{4})?\b/g,
   },
   // Acronyms: 2–6 uppercase letters (HAZOP, PLC, HVAC). The lookarounds exclude
   // letters that are part of a tag/standard/doc number (HE-301, AS/NZS, PID-PR);
@@ -715,7 +714,57 @@ const ENG = {
     re: /(?<![\w\-/])[A-Z]{2,6}(?![\w\-/])/g,
     keep: (s) => !ACRONYM_STOPLIST.has(s),
   },
+  // NB: Equipment Tags + Document Numbers are handled by collectCodes() below,
+  // not by a simple regex — they need structural classification.
 };
+
+/* ----------------------------------------------------------------------------
+   EQUIPMENT TAGS + DOCUMENT NUMBERS
+   These share a shape (alphanumeric groups joined by hyphens) and, in PDF text,
+   often come out with spaces around the hyphens ("226 - ZM - 001"). So we match
+   the whole hyphen chain (spaces allowed), canonicalise it (strip the spaces),
+   then classify it by structure:
+     • equipment tag   AREA-TYPE-NUM (226-ZM-001) or TYPE-NUM (TIT-642, P-101A)
+     • document number longer chains (P027A-000-MEM-ME-002, 2233-MDSP-091)
+   Spaceless instrument tags (TT601, TE614A) are caught by a small prefix list.
+   -------------------------------------------------------------------------- */
+const INSTR_PREFIX = 'TIT|TICV|TIC|TCV|TE|TT|TC|PIT|PIC|PCV|PT|FIT|FIC|FCV|FT|LIT|LIC|LCV|LT|AIT|AT';
+
+function classifyCode(groups) {
+  const joined = groups.join('');
+  if (!/\d/.test(joined)) return null;        // codes contain a digit
+  if (!/[A-Z]/.test(joined)) return null;     // …and an uppercase letter
+  if (/[a-z]/.test(joined)) return null;      // reject prose (side-by-side, air-cooled)
+  if (groups.some(g => g.length > 8)) return null;
+  const n = groups.length;
+  if (n >= 4) return 'doc';
+  if (n === 3) {
+    const [a, b, c] = groups;
+    if (/^\d+$/.test(a) && /^[A-Z]+$/.test(b) && /^\d+[A-Z]?$/.test(c)) return b.length <= 3 ? 'tag' : 'doc';
+    return 'doc';
+  }
+  if (n === 2) {
+    const [a, b] = groups;
+    if (/^[A-Z]+$/.test(a) && /^\d+[A-Z]?$/.test(b)) return 'tag'; // TIT-642, P-101A
+    return null;
+  }
+  return null;
+}
+
+function collectCodes(text) {
+  const tags = [], docnums = [];
+  let m;
+  const chainRe = /[A-Za-z0-9]{1,8}(?:[ ]?[-–][ ]?[A-Za-z0-9]{1,8}){1,}/g;
+  while ((m = chainRe.exec(text)) !== null) {
+    const canon = m[0].replace(/\s*[-–]\s*/g, '-');
+    const cls = classifyCode(canon.split('-'));
+    if (cls === 'tag') tags.push({ value: canon, index: m.index });
+    else if (cls === 'doc') docnums.push({ value: canon, index: m.index });
+  }
+  const instrRe = new RegExp('\\b(?:' + INSTR_PREFIX + ')\\d{2,4}[A-Z]?\\b', 'g');
+  while ((m = instrRe.exec(text)) !== null) tags.push({ value: m[0], index: m.index });
+  return { tags, docnums };
+}
 
 // Plain uppercase words that are not acronyms — filtered from the Acronyms lens.
 const ACRONYM_STOPLIST = new Set(
@@ -723,7 +772,8 @@ const ACRONYM_STOPLIST = new Set(
    'OLD SEE TWO WAY WHO DID ITS LET PUT SAY SHE TOO USE WITH FROM THIS THAT THEY HAVE WILL YOUR WHAT ' +
    'WHEN WHICH THERE THEIR ABOUT WOULD THESE OTHER BEEN MORE ALSO INTO ONLY OVER SUCH THAN THEM THEN ' +
    'WERE EACH MOST SOME TIME VERY WELL ITEM PAGE NOTE TBC TBA YES NO OK NA ' +
-   'ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN ZERO').split(/\s+/)
+   'ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN ZERO ' +
+   'LIST CASE PLAN SCOPE LOAD DUTY FLOW RATE BASE TYPE UNIT AREA DATA NAME DATE SITE COST PURPOSE').split(/\s+/)
 );
 
 /* ============================================================================
@@ -1065,6 +1115,7 @@ const state = {
   tab: 'general',       // 'general' | 'engineering'
   tableSel: 0,          // selected table index in the Tables lens
   tableQuery: '',       // Tables lens search text
+  paramSort: { col: null, dir: 1 }, // Parameters lens sort: col 'value'|'unit', dir 1 asc / -1 desc
 };
 
 // Definition of every category lens.
@@ -1103,12 +1154,19 @@ async function runSieves(text) {
   const links      = await collectMatches(text, PATTERNS.links);
   const dates      = await collectMatches(text, PATTERNS.dates);
   const money      = await collectMatches(text, PATTERNS.money);
-  const formulas   = await collectMatches(text, ENG.formulas);
-  const parameters = await collectMatches(text, ENG.parameters);
-  const standards  = await collectMatches(text, ENG.standards);
-  const docnums    = await collectMatches(text, ENG.docnums);
-  const tags       = await collectMatches(text, ENG.tags);
-  const acronyms   = await collectMatches(text, ENG.acronyms);
+  const formulas    = await collectMatches(text, ENG.formulas);
+  const parameters  = await collectMatches(text, ENG.parameters);
+  const standards   = await collectMatches(text, ENG.standards);
+  const acronymsRaw = await collectMatches(text, ENG.acronyms);
+  const { tags, docnums } = collectCodes(text); // structural classifier
+
+  // Drop "acronyms" that are really the letter-parts of a detected tag/doc number
+  // (e.g. ZM, PP, MEM, TIT) — the spaces around hyphens in PDF text let them slip
+  // through the regex's adjacency guard.
+  const codeWords = new Set();
+  for (const c of tags)    { c.value.split('-').forEach(g => { if (/^[A-Z]{2,}$/.test(g)) codeWords.add(g); }); const p = c.value.match(/^[A-Z]{2,}/); if (p) codeWords.add(p[0]); }
+  for (const c of docnums) c.value.split('-').forEach(g => { if (/^[A-Z]{2,}$/.test(g)) codeWords.add(g); });
+  const acronyms = acronymsRaw.filter(a => !codeWords.has(a.value));
 
   // Contact Info merges emails + phones (ordering is fixed up by the sort step).
   return { contact: [...emails, ...phones], links, dates, money, formulas, parameters, standards, docnums, tags, acronyms };
@@ -1294,7 +1352,8 @@ function renderPanel() {
   body.append(head);
 
   // ----- body by type -----
-  if (cat.type === 'list')        renderList(body, state.display[cat.key]);
+  if (cat.key === 'parameters')   renderParameters(body, state.display[cat.key]);
+  else if (cat.type === 'list')   renderList(body, state.display[cat.key]);
   else if (cat.type === 'raw')    renderRaw(body, state.results.rawText);
   else if (cat.type === 'images') renderGallery(body, state.results.images);
   else if (cat.type === 'tables') renderTables(body, state.results.tables);
@@ -1368,17 +1427,72 @@ function renderList(body, items) {
   items.forEach((item) => {
     const row = el('div', { className: 'kv-row' });
     row.append(el('span', { className: 'kv-val', textContent: item.value }));
-    const loc = el('span', { className: 'kv-loc', textContent: locate(item.index) });
-    const extra = item.indices.length - 1;
-    if (extra > 0) {
-      const more = el('span', { className: 'more more-link', textContent: '  (+' + extra + ' more)' });
-      more.addEventListener('click', (e) => { e.stopPropagation(); showOccurrences(more, item); });
-      loc.append(more);
-    }
-    row.append(loc);
+    row.append(locCell(item, 'kv-loc'));
     kv.append(row);
   });
   body.append(kv);
+}
+
+// A "Found at" cell/span: the first location + a clickable "(+N more)" that opens
+// the all-occurrences callout. Reused by the list and the Parameters table.
+function locCell(item, className) {
+  const loc = el('span', { className, textContent: locate(item.index) });
+  const extra = item.indices.length - 1;
+  if (extra > 0) {
+    const more = el('span', { className: 'more more-link', textContent: '  (+' + extra + ' more)' });
+    more.addEventListener('click', (e) => { e.stopPropagation(); showOccurrences(more, item); });
+    loc.append(more);
+  }
+  return loc;
+}
+
+// Parameters lens: a sortable Value | Unit | Found-at table. Click the Value
+// header to sort by numeric magnitude, the Unit header to sort A–Z (each click
+// toggles direction).
+function renderParameters(body, items) {
+  if (!items.length) { body.append(el('div', { className: 'empty', textContent: 'No matches.' })); return; }
+  // Split each "50 kPa" into a number + unit.
+  const parsed = items.map((it) => {
+    const m = it.value.match(/^\s*([-+]?[\d,]*\.?\d+)\s*(.*)$/);
+    return { ...it, numStr: m ? m[1] : it.value, num: m ? parseFloat(m[1].replace(/,/g, '')) : NaN, unit: m ? m[2].trim() : '' };
+  });
+  const host = el('div'); body.append(host);
+
+  const paint = () => {
+    host.innerHTML = '';
+    const ps = state.paramSort;
+    const rows = parsed.slice();
+    if (ps.col === 'value')      rows.sort((a, b) => (a.num - b.num) * ps.dir);
+    else if (ps.col === 'unit')  rows.sort((a, b) => (a.unit.localeCompare(b.unit, undefined, { sensitivity: 'base' }) || (a.num - b.num)) * ps.dir);
+    // else: leave in the order applyListOptions produced (source order / A–Z)
+
+    const arrow = (c) => ps.col === c ? (ps.dir > 0 ? ' ▲' : ' ▼') : '';
+    const table = el('table', { className: 'ptable' });
+    const thead = el('thead'); const htr = el('tr');
+    const thVal  = el('th', { className: 'sortable', textContent: 'Value' + arrow('value'), title: 'Sort by value' });
+    const thUnit = el('th', { className: 'sortable', textContent: 'Unit' + arrow('unit'), title: 'Sort A–Z by unit' });
+    const thLoc  = el('th', { textContent: 'Found at' });
+    thVal.onclick  = () => setSort('value');
+    thUnit.onclick = () => setSort('unit');
+    htr.append(thVal, thUnit, thLoc); thead.append(htr); table.append(thead);
+
+    const tbody = el('tbody');
+    rows.forEach((r) => {
+      const tr = el('tr');
+      tr.append(el('td', { className: 'p-num', textContent: r.numStr }));
+      tr.append(el('td', { className: 'p-unit', textContent: r.unit }));
+      const td = el('td'); td.append(locCell(r, 'p-loc')); tr.append(td);
+      tbody.append(tr);
+    });
+    table.append(tbody);
+    host.append(table);
+  };
+  const setSort = (col) => {
+    const ps = state.paramSort;
+    if (ps.col === col) ps.dir = -ps.dir; else { ps.col = col; ps.dir = 1; }
+    paint();
+  };
+  paint();
 }
 
 /* Popover listing every occurrence (location) of a deduped value. */
