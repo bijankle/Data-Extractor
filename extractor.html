@@ -467,6 +467,7 @@
   .tbl-item-loc { font-size: 10px; color: var(--muted); font-weight: 500; }
   .tbl-detail { flex: 1; min-width: 0; }
   .tbl-empty { font-size: 13px; color: var(--muted); padding: 12px 4px; }
+  .ai-status { display: flex; align-items: center; gap: 10px; padding: 18px; border: 1px solid var(--accent-tint-border); background: var(--accent-tint-bg); border-radius: var(--r-card); font-size: 14px; font-weight: 600; color: var(--accent-deep); }
   @media (max-width: 720px) { .tbl-layout { flex-direction: column; } .tbl-side { width: 100%; } }
 
   /* tables — single table view */
@@ -1102,6 +1103,170 @@ function deriveTableName(rows) {
   return s.replace(/[\s,;:.\-]+$/, '') || null;
 }
 
+/* ============================================================================
+   AI TABLE EXTRACTION (opt-in, on-demand)
+   Pipeline (all local once the model weights download from the HF CDN):
+     render PDF page -> Table Transformer DETECTION (table boxes)
+       -> Table Transformer STRUCTURE recognition (row + column boxes)
+       -> fill the grid from the PDF.js text layer (or Tesseract OCR for scans).
+   This is heavier and slower than the geometry method, so it only runs when the
+   user clicks the button. The whole module is isolated — failures never touch
+   the default geometry tables.
+   ========================================================================== */
+const TRANSFORMERS_CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm'; // latest 3.x, ESM
+const TESSERACT_CDN    = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+const AI_RENDER_SCALE  = 2;   // page render resolution for the vision models
+
+let _tf = null, _detPipe = null, _structPipe = null;
+async function loadTransformers() {
+  if (_tf) return _tf;
+  const mod = await import(/* webpackIgnore: true */ TRANSFORMERS_CDN);
+  mod.env.allowLocalModels = false;          // always fetch from the HF hub
+  if (mod.env.backends?.onnx?.wasm) mod.env.backends.onnx.wasm.proxy = false;
+  _tf = mod;
+  return mod;
+}
+// Pick WebGPU when available (much faster), else fall back to WASM.
+async function getPipelines(onStatus) {
+  const tf = await loadTransformers();
+  const device = (typeof navigator !== 'undefined' && navigator.gpu) ? 'webgpu' : 'wasm';
+  if (!_detPipe)    { onStatus('Loading table-detection model…'); _detPipe    = await tf.pipeline('object-detection', 'Xenova/table-transformer-detection', { device }).catch(() => tf.pipeline('object-detection', 'Xenova/table-transformer-detection')); }
+  if (!_structPipe) { onStatus('Loading table-structure model…'); _structPipe = await tf.pipeline('object-detection', 'Xenova/table-transformer-structure-recognition', { device }).catch(() => tf.pipeline('object-detection', 'Xenova/table-transformer-structure-recognition')); }
+  return { tf, det: _detPipe, struct: _structPipe };
+}
+
+async function renderPageCanvas(page, scale) {
+  const viewport = page.getViewport({ scale });
+  const canvas = el('canvas'); canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  return { canvas, viewport };
+}
+const canvasToURL = (canvas) => new Promise(r => canvas.toBlob(b => r(URL.createObjectURL(b)), 'image/png'));
+
+// OCR a cropped table image with Tesseract, returning words in PAGE pixel coords.
+async function ocrWords(cropCanvas, ox, oy) {
+  await loadScript(TESSERACT_CDN);
+  const url = await canvasToURL(cropCanvas);
+  let words = [];
+  try {
+    const worker = await window.Tesseract.createWorker('eng');
+    const res = await worker.recognize(url, {}, { blocks: true });
+    await worker.terminate();
+    const collect = (w) => { if (w && w.text && w.text.trim() && w.bbox) words.push({ s: w.text.trim(), x0: w.bbox.x0 + ox, x1: w.bbox.x1 + ox, yc: (w.bbox.y0 + w.bbox.y1) / 2 + oy }); };
+    if (res.data.words) res.data.words.forEach(collect);
+    else if (res.data.blocks) res.data.blocks.forEach(b => b.paragraphs?.forEach(p => p.lines?.forEach(l => l.words?.forEach(collect))));
+  } finally { URL.revokeObjectURL(url); }
+  return words;
+}
+
+// Run the AI pipeline over one PDF File. `method` is 'text' or 'ocr'.
+async function aiExtractPdf(file, method, onStatus) {
+  await ensurePdfjs();
+  const { det, struct } = await getPipelines(onStatus);
+  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const baseName = file.name.replace(/\.pdf$/i, '');
+  const tables = [];
+  let tcount = 0;
+
+  for (let p = 1; p <= pdf.numPages; p++) {
+    onStatus(`Analysing page ${p} of ${pdf.numPages}…`);
+    const page = await pdf.getPage(p);
+    const { canvas, viewport } = await renderPageCanvas(page, AI_RENDER_SCALE);
+    const pageURL = await canvasToURL(canvas);
+    let detected = [];
+    try { detected = await det(pageURL, { threshold: 0.6 }); } catch (_) {} finally { URL.revokeObjectURL(pageURL); }
+
+    // text words in page pixels (text method)
+    let pageWords = null;
+    if (method === 'text') {
+      const Hpts = viewport.height / AI_RENDER_SCALE;
+      const tc = await page.getTextContent();
+      pageWords = tc.items.filter(i => i.str.trim()).map(i => ({
+        s: i.str.trim(),
+        x0: i.transform[4] * AI_RENDER_SCALE,
+        x1: (i.transform[4] + (i.width || 0)) * AI_RENDER_SCALE,
+        yc: (Hpts - i.transform[5]) * AI_RENDER_SCALE,
+      }));
+    }
+
+    for (const d of detected) {
+      if (!/table/i.test(d.label)) continue;
+      const b = d.box;
+      const x0 = Math.max(0, Math.floor(b.xmin)), y0 = Math.max(0, Math.floor(b.ymin));
+      const w = Math.min(canvas.width - x0, Math.ceil(b.xmax - b.xmin)), h = Math.min(canvas.height - y0, Math.ceil(b.ymax - b.ymin));
+      if (w < 30 || h < 30) continue;
+
+      const crop = el('canvas'); crop.width = w; crop.height = h;
+      crop.getContext('2d').drawImage(canvas, x0, y0, w, h, 0, 0, w, h);
+      const cropURL = await canvasToURL(crop);
+      let parts = [];
+      try { parts = await struct(cropURL, { threshold: 0.5 }); } catch (_) {} finally { URL.revokeObjectURL(cropURL); }
+
+      // row + column boxes, shifted from crop space back into page pixels
+      const rows = parts.filter(o => /table row/i.test(o.label)).map(o => ({ y0: o.box.ymin + y0, y1: o.box.ymax + y0 })).sort((a, b) => a.y0 - b.y0);
+      const cols = parts.filter(o => /table column/i.test(o.label) && !/header/i.test(o.label)).map(o => ({ x0: o.box.xmin + x0, x1: o.box.xmax + x0 })).sort((a, b) => a.x0 - b.x0);
+      if (rows.length < 2 || cols.length < 1) continue;
+
+      // words for this table
+      let words = pageWords;
+      if (method === 'ocr') { onStatus(`OCR on a table from page ${p}…`); words = await ocrWords(crop, x0, y0); }
+
+      const grid = rows.map(() => cols.map(() => []));
+      for (const wd of words) {
+        const cx = (wd.x0 + wd.x1) / 2, cy = wd.yc;
+        const ri = rows.findIndex(r => cy >= r.y0 && cy <= r.y1);
+        if (ri < 0) continue;
+        let ci = cols.findIndex(c => cx >= c.x0 && cx <= c.x1);
+        if (ci < 0) { // nearest column if it falls in a gutter
+          let bd = Infinity; cols.forEach((c, i) => { const d2 = Math.abs((c.x0 + c.x1) / 2 - cx); if (d2 < bd) { bd = d2; ci = i; } });
+        }
+        grid[ri][ci].push(wd);
+      }
+      const out = grid.map(r => r.map(cell => cell.sort((a, b) => a.x0 - b.x0).map(wd => wd.s).join(' ').trim()))
+                      .filter(r => r.some(c => c)); // drop empty rows
+      if (out.length < 2) continue;
+      tcount++;
+      tables.push({ name: `Table ${tcount}`, rows: out, page: p, source: baseName + '.pdf' });
+    }
+    await microYield();
+  }
+  return tables;
+}
+
+// Run AI extraction across all PDF sources in the pool.
+async function runAiExtraction(method, onStatus) {
+  const pdfs = state.sources.filter(s => s.status === 'ok' && s.file && /\.pdf$/i.test(s.name));
+  if (!pdfs.length) throw new Error('AI table extraction needs a PDF — drop one first.');
+  const all = [];
+  for (const s of pdfs) {
+    const ts = await aiExtractPdf(s.file, method, onStatus);
+    ts.forEach(t => all.push({ ...t, source: s.name }));
+  }
+  return all;
+}
+
+// Drive the on-demand AI extraction: flip to a busy view, stream status text,
+// then show the AI tables (or restore on error). Defined here; called from the
+// Tables panel button.
+async function startAiExtraction(method) {
+  if (state.aiBusy) return;
+  state.aiBusy = true; state.aiStatus = 'Starting…';
+  renderPills(); renderPanel();
+  const onStatus = (m) => { state.aiStatus = m; const e = document.getElementById('aiStatus'); if (e) e.textContent = m; };
+  try {
+    const tables = await runAiExtraction(method, onStatus);
+    state.aiTables = tables;
+    state.tableSel = 0;
+    if (!tables.length) toast('The AI models ran but found no tables on these pages.', 'warn', 'Smart extraction');
+    else toast(`AI extracted ${tables.length} table${tables.length === 1 ? '' : 's'}.`, 'ok');
+  } catch (e) {
+    toast(e.message || 'The model failed to load or run.', 'error', 'Smart extraction failed', 9000);
+  } finally {
+    state.aiBusy = false;
+    renderPills(); renderPanel();
+  }
+}
+
 // Pull one image object out of a PDF page and convert it to a PNG blob.
 // Returns null (rather than hanging) if the object can't be resolved.
 function pdfImageToBlob(page, objName) {
@@ -1223,6 +1388,9 @@ const state = {
   filter: '',           // global filter text (applies to every lens)
   paramSort: { col: null, dir: 1 }, // Parameters lens sort: col 'value'|'unit'|'loc', dir 1 asc / -1 desc
   listSort: {},         // per-list-lens sort, keyed by category: { col:'value'|'loc', dir }
+  aiTables: null,       // AI-extracted tables (null until the user runs Smart extraction)
+  aiBusy: false,        // true while the AI pipeline is running
+  aiStatus: '',         // latest progress message during AI extraction
 };
 
 // Definition of every category lens.
@@ -1464,9 +1632,15 @@ function applyFilterList(items) {
 function tableMatches(t, f) {
   return !f || f.test(t.name + ' ' + t.rows.map(r => (Array.isArray(r) ? r : [r]).join(' ')).join(' '));
 }
+// The tables currently on show: AI ones if the user ran Smart extraction, else
+// the default geometry ones.
+function currentTables() {
+  if (state.aiTables) return state.aiTables;
+  return state.results ? state.results.tables : [];
+}
 function filteredTables() {
   const f = getFilter();
-  return (state.results ? state.results.tables : []).filter(t => tableMatches(t, f));
+  return currentTables().filter(t => tableMatches(t, f));
 }
 
 // How many items does a category currently hold? Drives badges + enabled state.
@@ -1544,7 +1718,7 @@ function renderPanel() {
   else if (cat.type === 'list')   renderList(body, applyFilterList(state.display[cat.key]), cat.key);
   else if (cat.type === 'raw')    renderRaw(body, state.results.rawText);
   else if (cat.type === 'images') renderGallery(body, state.results.images);
-  else if (cat.type === 'tables') renderTables(body, state.results.tables);
+  else if (cat.type === 'tables') renderTables(body, currentTables());
 }
 
 /* shared output layer: Copy All + Download (format-aware) ---------------- */
@@ -1576,16 +1750,29 @@ function buildOutputControls(cat) {
   }
 
   if (cat.type === 'tables') {
-    // Copy the selected table (TSV) + download all tables as one Excel workbook.
+    // --- Smart (AI) extraction: pick a method, then run on demand ---
+    const sel = el('select', { className: 'fmt', title: 'Which AI method to use' });
+    sel.append(el('option', { value: 'text', textContent: 'AI · Text PDF' }));
+    sel.append(el('option', { value: 'ocr', textContent: 'AI · Scanned (OCR)' }));
+    actions.append(sel);
+    actions.append(el('button', {
+      className: 'btn btn-secondary sm', textContent: state.aiBusy ? 'Working…' : '✨ Smart extract',
+      disabled: state.aiBusy,
+      onclick: () => startAiExtraction(sel.value),
+    }));
+    if (state.aiTables) actions.append(el('button', { className: 'btn btn-ghost sm', textContent: '↩ Geometry',
+      onclick: () => { state.aiTables = null; state.tableSel = 0; renderPills(); renderPanel(); } }));
+
+    // Copy the selected table (TSV) + download all (Excel) — of whatever's shown.
     actions.append(iconBtn('copy', 'Copy the selected table to clipboard',
       async () => {
-        const t = state.results.tables[state.tableSel];
+        const t = currentTables()[state.tableSel];
         if (!t) return;
         await navigator.clipboard.writeText(rowsToTsv(t.rows));
         toast('Copied “' + t.name + '” to clipboard.', 'ok');
       }));
     actions.append(iconBtn('download', 'Download all tables (Excel)',
-      () => downloadTablesXlsx(state.results.tables), 'btn-primary'));
+      () => downloadTablesXlsx(currentTables()), 'btn-primary'));
   }
 
   return actions;
@@ -1864,6 +2051,15 @@ function openLightbox(images, startIdx) {
 }
 
 function renderTables(body, tables) {
+  // While AI extraction runs, show a progress panel instead of the tables.
+  if (state.aiBusy) {
+    const box = el('div', { className: 'ai-status' });
+    box.append(el('span', { className: 'spin' }));
+    box.append(el('span', { id: 'aiStatus', textContent: state.aiStatus || 'Starting…' }));
+    body.append(box);
+    body.append(el('div', { className: 'dz-hint', style: 'margin-top:10px;', textContent: 'First run downloads the model (tens of MB) from the CDN; later runs are faster. Inference is local — nothing is uploaded.' }));
+    return;
+  }
   // Master/detail: a list of tables on the left, the selected table on the right.
   // The global filter hides tables with no match and highlights matches in the
   // table shown.
@@ -2024,7 +2220,7 @@ async function ingestFiles(fileList) {
   const files = Array.from(fileList);
   for (const file of files) {
     const id = 'f' + Date.now() + Math.random().toString(36).slice(2, 7);
-    const src = { id, name: file.name, size: file.size, status: 'busy', sieveText: '', displayText: '', images: [], tables: [] };
+    const src = { id, name: file.name, size: file.size, status: 'busy', sieveText: '', displayText: '', images: [], tables: [], file };
     state.sources.push(src);
     renderChips();
 
