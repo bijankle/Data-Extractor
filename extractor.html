@@ -393,9 +393,32 @@
   .img-card .img-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--hairline); }
   .img-card .img-name { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  /* tables */
+  /* tables — master/detail */
+  .tbl-layout { display: flex; gap: 16px; align-items: flex-start; }
+  .tbl-side { width: 250px; flex: none; display: flex; flex-direction: column; gap: 10px; }
+  .tbl-search {
+    height: 36px; padding: 0 12px; border: 1px solid #C7CAD1; border-radius: var(--r-btn);
+    font-size: 13px; font-family: var(--font); color: var(--text-primary); background: #fff; outline: none;
+  }
+  .tbl-search:focus { border-color: var(--accent); }
+  .tbl-list { display: flex; flex-direction: column; gap: 6px; max-height: 540px; overflow: auto; }
+  .tbl-item {
+    text-align: left; border: 1px solid var(--border); border-radius: 8px; background: #fff;
+    padding: 9px 11px; cursor: pointer; font-family: var(--font);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .tbl-item:hover { background: var(--n1); border-color: var(--faint-2); }
+  .tbl-item.active { background: var(--accent-tint-bg); border-color: var(--accent-tint-border); }
+  .tbl-item-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+  .tbl-item.active .tbl-item-name { color: var(--accent-deep); }
+  .tbl-item-loc { font-size: 11px; color: var(--muted); font-weight: 500; }
+  .tbl-detail { flex: 1; min-width: 0; }
+  .tbl-empty { font-size: 13px; color: var(--muted); padding: 12px 4px; }
+  @media (max-width: 720px) { .tbl-layout { flex-direction: column; } .tbl-side { width: 100%; } }
+
+  /* tables — single table view */
   .tbl-wrap { margin-bottom: 22px; }
-  .tbl-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  .tbl-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
   .tbl-head .tname { font-weight: 700; color: var(--text-primary); font-size: 14px; }
   .tbl-scroll { overflow: auto; border: 1px solid var(--border); border-radius: var(--r-card); max-height: 420px; }
   table.data { border-collapse: collapse; width: 100%; font-size: 13px; }
@@ -773,7 +796,6 @@ async function parsePdf(file, beat = () => {}) {
   const tables = [];
   let tableCount = 0;
   const seen = new Set();
-  const baseName = file.name.replace(/\.pdf$/i, '');
 
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
@@ -789,7 +811,8 @@ async function parsePdf(file, beat = () => {}) {
     try {
       const viewport = page.getViewport({ scale: 1 });
       extractPdfTables(content, viewport).forEach((rows) => {
-        tables.push({ name: `${baseName} — Table ${++tableCount}`, rows, page: p });
+        // Just "Table N" — no filename prefix (usually one file at a time).
+        tables.push({ name: `Table ${++tableCount}`, rows, page: p });
       });
     } catch (_) { /* table reconstruction is best-effort */ }
 
@@ -1040,6 +1063,8 @@ const state = {
   results: null,        // computed by recompute()
   active: 'rawText',    // currently selected category
   tab: 'general',       // 'general' | 'engineering'
+  tableSel: 0,          // selected table index in the Tables lens
+  tableQuery: '',       // Tables lens search text
 };
 
 // Definition of every category lens.
@@ -1462,35 +1487,83 @@ function openLightbox(images, startIdx) {
 }
 
 function renderTables(body, tables) {
-  tables.forEach((t, ti) => {
-    const wrap = el('div', { className: 'tbl-wrap' });
-    const head = el('div', { className: 'tbl-head' });
-    const title = el('span', { className: 'tname', textContent: t.name });
-    const loc = pageLocation(t.source, t.page);
-    if (loc) title.append(el('span', { className: 'tloc', textContent: '  ·  ' + loc }));
-    head.append(title);
-    const btns = el('div', { style: 'display:flex; gap:8px;' });
-    // Copy this one table to the clipboard as TSV (pastes cleanly into Excel/Sheets).
-    btns.append(el('button', { className: 'btn btn-secondary sm', textContent: 'Copy to clipboard',
-      onclick: async () => { await navigator.clipboard.writeText(rowsToTsv(t.rows)); toast('Copied “' + t.name + '” to clipboard.', 'ok'); } }));
-    btns.append(el('button', { className: 'btn btn-secondary sm', textContent: 'Download CSV',
-      onclick: () => downloadText(rowsToCsv(t.rows), (t.name || ('table' + ti)) + '.csv') }));
-    head.append(btns);
-    wrap.append(head);
+  // Master/detail: a searchable list of tables on the left, the selected table
+  // shown on the right (one at a time).
+  const layout = el('div', { className: 'tbl-layout' });
+  const side = el('div', { className: 'tbl-side' });
+  const search = el('input', { className: 'tbl-search', type: 'search', placeholder: '🔍  Search tables…' });
+  search.value = state.tableQuery || '';
+  const listEl = el('div', { className: 'tbl-list' });
+  side.append(search, listEl);
+  const detail = el('div', { className: 'tbl-detail' });
+  layout.append(side, detail);
+  body.append(layout);
 
-    const scroll = el('div', { className: 'tbl-scroll' });
-    const table = el('table', { className: 'data' });
-    t.rows.slice(0, 500).forEach((r) => { // cap render at 500 rows for responsiveness
-      const tr = el('tr');
-      (Array.isArray(r) ? r : [r]).forEach((c) => tr.append(el('td', { textContent: c == null ? '' : String(c) })));
-      table.append(tr);
+  // "Relatively intelligent" match: strip case + everything non-alphanumeric, so
+  // "lo l" matches "lol" and "711364" matches "$7,113.64".
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const contents = tables.map(t => norm(t.name + ' ' + t.rows.map(r => (Array.isArray(r) ? r : [r]).join(' ')).join(' ')));
+
+  let sel = Math.min(Math.max(state.tableSel || 0, 0), tables.length - 1);
+
+  function paintList() {
+    listEl.innerHTML = '';
+    const q = norm(search.value);
+    let shown = 0;
+    tables.forEach((t, i) => {
+      if (q && !contents[i].includes(q)) return; // filter: only tables containing the text
+      shown++;
+      const item = el('button', { className: 'tbl-item' + (i === sel ? ' active' : '') });
+      item.append(el('span', { className: 'tbl-item-name', textContent: t.name }));
+      const loc = pageLocation(t.source, t.page);
+      if (loc) item.append(el('span', { className: 'tbl-item-loc', textContent: loc }));
+      item.onclick = () => { sel = i; state.tableSel = i; paintList(); paintDetail(); };
+      listEl.append(item);
     });
-    scroll.append(table);
-    wrap.append(scroll);
-    if (t.rows.length > 500) wrap.append(el('div', { className: 'dz-hint', style: 'margin-top:6px;',
-      textContent: `Showing first 500 of ${t.rows.length} rows. Download CSV for the full table.` }));
-    body.append(wrap);
+    if (!shown) listEl.append(el('div', { className: 'tbl-empty', textContent: q ? 'No tables contain “' + search.value.trim() + '”.' : 'No tables.' }));
+  }
+
+  function paintDetail() {
+    detail.innerHTML = '';
+    const t = tables[sel];
+    if (!t) { detail.append(el('div', { className: 'empty', textContent: 'Select a table from the list.' })); return; }
+    detail.append(renderOneTable(t, sel));
+  }
+
+  search.addEventListener('input', () => { state.tableQuery = search.value; paintList(); });
+  paintList();
+  paintDetail();
+}
+
+// Render a single table (header + copy/download + scrollable grid).
+function renderOneTable(t, ti) {
+  const wrap = el('div', { className: 'tbl-wrap' });
+  const head = el('div', { className: 'tbl-head' });
+  const title = el('span', { className: 'tname', textContent: t.name });
+  const loc = pageLocation(t.source, t.page);
+  if (loc) title.append(el('span', { className: 'tloc', textContent: '  ·  ' + loc }));
+  head.append(title);
+  const btns = el('div', { style: 'display:flex; gap:8px;' });
+  // Copy this table to the clipboard as TSV (pastes cleanly into Excel/Sheets).
+  btns.append(el('button', { className: 'btn btn-secondary sm', textContent: 'Copy to clipboard',
+    onclick: async () => { await navigator.clipboard.writeText(rowsToTsv(t.rows)); toast('Copied “' + t.name + '” to clipboard.', 'ok'); } }));
+  btns.append(el('button', { className: 'btn btn-secondary sm', textContent: 'Download CSV',
+    onclick: () => downloadText(rowsToCsv(t.rows), (t.name || ('table' + ti)) + '.csv') }));
+  head.append(btns);
+  wrap.append(head);
+
+  const scroll = el('div', { className: 'tbl-scroll' });
+  const table = el('table', { className: 'data' });
+  t.rows.slice(0, 500).forEach((r) => { // cap render at 500 rows for responsiveness
+    const tr = el('tr');
+    (Array.isArray(r) ? r : [r]).forEach((c) => tr.append(el('td', { textContent: c == null ? '' : String(c) })));
+    table.append(tr);
   });
+  scroll.append(table);
+  wrap.append(scroll);
+  if (t.rows.length > 500) wrap.append(el('div', { className: 'dz-hint', style: 'margin-top:6px;',
+    textContent: `Showing first 500 of ${t.rows.length} rows. Download CSV for the full table.` }));
+  return wrap;
 }
 
 /* ============================================================================
