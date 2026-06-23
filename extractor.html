@@ -278,19 +278,23 @@
   .opt input:checked + .toggle::after { transform: translateX(16px); }
   .opt input:disabled + .toggle { opacity: .45; }
 
-  /* ---- Category pills -------------------------------------------------- */
-  .pills { display: flex; flex-wrap: wrap; gap: 9px; }
+  /* ---- Category pills (two-line: label + tiny example) ----------------- */
+  .pills { display: block; }
   .pill-btn {
-    display: inline-flex; align-items: center; gap: 8px;
-    height: 36px; padding: 0 8px 0 15px;
-    border: 1px solid var(--border); border-radius: var(--r-pill);
-    background: #fff; color: var(--text-body);
-    font-size: 13.5px; font-weight: 500; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 9px;
+    min-height: 40px; padding: 4px 10px 4px 14px;
+    border: 1px solid var(--border); border-radius: 12px;
+    background: #fff; color: var(--text-body); cursor: pointer; text-align: left;
     transition: background .12s, border-color .12s, color .12s;
   }
   .pill-btn:hover:not(:disabled) { border-color: var(--faint-2); background: var(--n1); }
-  .pill-btn.active { background: var(--accent-tint-bg); border-color: var(--accent-tint-border); color: var(--accent-deep); font-weight: 600; }
-  .pill-btn:disabled { color: var(--faint-2); background: var(--n1); border-color: var(--n2); cursor: not-allowed; }
+  .pill-btn.active { background: var(--accent-tint-bg); border-color: var(--accent-tint-border); }
+  .pill-btn:disabled { background: var(--n1); border-color: var(--n2); cursor: not-allowed; }
+  .pill-text { display: flex; flex-direction: column; line-height: 1.15; }
+  .pill-label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+  .pill-btn.active .pill-label { color: var(--accent-deep); }
+  .pill-btn:disabled .pill-label { color: var(--faint-2); }
+  .pill-eg { font-size: 9.5px; font-weight: 500; color: var(--faint-2); margin-top: 1px; }
   .badge {
     min-width: 20px; height: 20px; padding: 0 6px;
     border-radius: var(--r-pill); background: var(--n2); color: var(--muted);
@@ -335,15 +339,12 @@
   .ctx-nav { display: flex; gap: 6px; margin-top: 10px; }
   .ctx-nav .btn { width: 32px; padding: 0; justify-content: center; font-size: 16px; }
 
-  /* ---- Tabs (General / Engineering) ------------------------------------ */
-  .tabs { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--n1); margin-bottom: 12px; }
-  .tab {
-    height: 34px; padding: 0 18px; border: none; border-radius: var(--r-pill);
-    background: transparent; color: var(--text-body); font-size: 13.5px; font-weight: 600;
-    cursor: pointer; transition: background .12s, color .12s;
+  /* ---- Two pill rows (general / engineering) --------------------------- */
+  .pill-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .pill-row-label {
+    font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+    color: var(--faint-2); width: 78px; flex: none;
   }
-  .tab:hover:not(.active) { background: var(--n2); }
-  .tab.active { background: var(--accent); color: #fff; }
 
   /* ---- Two-column location table (value | where it was found) ---------- */
   .kv { border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; }
@@ -545,10 +546,6 @@
 
   <!-- ============================ CATEGORIES =========================== -->
   <p class="label">Categories</p>
-  <div class="tabs" id="tabs">
-    <button class="tab active" data-tab="general">General</button>
-    <button class="tab" data-tab="engineering">Engineering</button>
-  </div>
   <div class="pills" id="pills"></div>
 
   <!-- ============================ RESULTS ============================== -->
@@ -1197,7 +1194,6 @@ const state = {
   sources: [],          // { id, name, status:'ok'|'busy'|'err', sieveText, displayText, images[], tables[], pages? }
   results: null,        // computed by recompute()
   active: 'rawText',    // currently selected category
-  tab: 'general',       // 'general' | 'engineering'
   tableSel: 0,          // selected table index in the Tables lens
   filter: '',           // global filter text (applies to every lens)
   paramSort: { col: null, dir: 1 }, // Parameters lens sort: col 'value'|'unit'|'loc', dir 1 asc / -1 desc
@@ -1206,24 +1202,25 @@ const state = {
 
 // Definition of every category lens.
 //   type: 'list' (text sieve results), 'raw' text, or structure ('images'/'tables').
-//   tab:  which top-level tab the lens lives under.
-// Contact Info merges emails + phones into a single lens.
+//   row:  which pill row it sits in ('general' on top, 'engineering' below).
+//   eg:   a tiny example shown under the label on the pill.
+// Contacts merges emails + phones into a single lens.
 const CATEGORIES = [
-  // --- General tab ---
-  { key: 'contact',   label: 'Contact Info', type: 'list', tab: 'general' },
-  { key: 'links',     label: 'Links',   type: 'list',   tab: 'general' },
-  { key: 'dates',     label: 'Dates',   type: 'list',   tab: 'general' },
-  { key: 'money',     label: 'Finance', type: 'list',   tab: 'general' },
-  { key: 'images',    label: 'Images',  type: 'images', tab: 'general' },
-  { key: 'tables',    label: 'Tables',  type: 'tables', tab: 'general' },
-  { key: 'rawText',   label: 'Raw Text', type: 'raw',   tab: 'general' },
-  // --- Engineering tab ---
-  { key: 'formulas',  label: 'Formulas',            type: 'list', tab: 'engineering' },
-  { key: 'parameters',label: 'Parameters',          type: 'list', tab: 'engineering' },
-  { key: 'standards', label: 'Standards & Codes',   type: 'list', tab: 'engineering' },
-  { key: 'docnums',   label: 'Document Numbers',    type: 'list', tab: 'engineering' },
-  { key: 'tags',      label: 'Equipment & Tags',    type: 'list', tab: 'engineering' },
-  { key: 'acronyms',  label: 'Acronyms',            type: 'list', tab: 'engineering' },
+  // --- General row ---
+  { key: 'contact',   label: 'Contacts',    type: 'list',   row: 'general', eg: 'e.g. name@site.com' },
+  { key: 'links',     label: 'Links',       type: 'list',   row: 'general', eg: 'e.g. https://…' },
+  { key: 'dates',     label: 'Dates',       type: 'list',   row: 'general', eg: 'e.g. 23/06/2026' },
+  { key: 'money',     label: 'Finance',     type: 'list',   row: 'general', eg: 'e.g. $7,113.64' },
+  { key: 'docnums',   label: 'Doc Numbers', type: 'list',   row: 'general', eg: 'e.g. PID-PR-K-132' },
+  { key: 'acronyms',  label: 'Acronyms',    type: 'list',   row: 'general', eg: 'e.g. HAZOP' },
+  { key: 'images',    label: 'Images',      type: 'images', row: 'general', eg: 'embedded pictures' },
+  { key: 'tables',    label: 'Tables',      type: 'tables', row: 'general', eg: 'grids from the file' },
+  { key: 'rawText',   label: 'Raw Text',    type: 'raw',    row: 'general', eg: 'full clean text' },
+  // --- Engineering row ---
+  { key: 'formulas',  label: 'Formulas',    type: 'list',   row: 'engineering', eg: 'e.g. e = mc²' },
+  { key: 'parameters',label: 'Parameters',  type: 'list',   row: 'engineering', eg: 'e.g. 50 kPa' },
+  { key: 'standards', label: 'Standards',   type: 'list',   row: 'engineering', eg: 'e.g. AS2419.1' },
+  { key: 'tags',      label: 'Tags',        type: 'list',   row: 'engineering', eg: 'e.g. 226-PP-001' },
 ];
 
 /* ----- run all text sieves over the merged text, chunked to stay smooth --- */
@@ -1462,27 +1459,33 @@ function countOf(key) {
    ========================================================================== */
 function renderPills() {
   const wrap = $('#pills'); wrap.innerHTML = '';
-  const inTab = CATEGORIES.filter(c => c.tab === state.tab);
 
-  // If the active category isn't in this tab or is empty, jump to the first
-  // category in the tab that has results (else the first one, shown disabled).
-  if (!inTab.some(c => c.key === state.active) || countOf(state.active) === 0) {
-    const firstFull = inTab.find(c => countOf(c.key) > 0);
-    state.active = firstFull ? firstFull.key : inTab[0].key;
+  // If the active category is empty, jump to the first that has results.
+  if (countOf(state.active) === 0) {
+    const firstFull = CATEGORIES.find(c => countOf(c.key) > 0);
+    state.active = firstFull ? firstFull.key : CATEGORIES[0].key;
   }
 
-  for (const cat of inTab) {
-    const n = countOf(cat.key);
-    const enabled = n > 0;
-    const btn = el('button', {
-      className: 'pill-btn' + (state.active === cat.key && enabled ? ' active' : ''),
-      disabled: !enabled,
-      onclick: () => { state.active = cat.key; renderPills(); renderPanel(); },
-    });
-    btn.append(cat.label);
-    // Raw Text shows no count badge (it's a single view); others do.
-    if (cat.key !== 'rawText') btn.append(el('span', { className: 'badge', textContent: String(n) }));
-    wrap.append(btn);
+  // Two rows of pills: general on top, engineering below.
+  for (const row of ['general', 'engineering']) {
+    const rowEl = el('div', { className: 'pill-row' });
+    rowEl.append(el('span', { className: 'pill-row-label', textContent: row }));
+    for (const cat of CATEGORIES.filter(c => c.row === row)) {
+      const n = countOf(cat.key);
+      const enabled = n > 0;
+      const btn = el('button', {
+        className: 'pill-btn' + (state.active === cat.key && enabled ? ' active' : ''),
+        disabled: !enabled,
+        onclick: () => { state.active = cat.key; renderPills(); renderPanel(); },
+      });
+      const txt = el('span', { className: 'pill-text' });
+      txt.append(el('span', { className: 'pill-label', textContent: cat.label }));
+      if (cat.eg) txt.append(el('span', { className: 'pill-eg', textContent: cat.eg }));
+      btn.append(txt);
+      if (cat.key !== 'rawText') btn.append(el('span', { className: 'badge', textContent: String(n) }));
+      rowEl.append(btn);
+    }
+    wrap.append(rowEl);
   }
 }
 
@@ -2057,15 +2060,6 @@ function updateFilterInfo() {
   const hits = CATEGORIES.filter(c => countOf(c.key) > 0).length;
   info.textContent = hits ? `Filtering — ${hits} categor${hits === 1 ? 'y' : 'ies'} with matches` : 'No matches anywhere';
 }
-
-/* tab switching (General / Engineering) — just re-renders, no re-parse */
-$('#tabs').addEventListener('click', (e) => {
-  const btn = e.target.closest('.tab');
-  if (!btn) return;
-  state.tab = btn.dataset.tab;
-  document.querySelectorAll('#tabs .tab').forEach(t => t.classList.toggle('active', t === btn));
-  renderPills(); renderPanel();
-});
 
 // first paint
 renderPills();
