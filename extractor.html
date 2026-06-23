@@ -371,10 +371,25 @@
   .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
   .img-card { border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; background: #fff; }
   .img-card .thumb {
-    height: 130px; background: var(--n2);
+    height: 130px; background: var(--n2); cursor: zoom-in;
     display: flex; align-items: center; justify-content: center; overflow: hidden;
   }
-  .img-card .thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .img-card .thumb img { max-width: 100%; max-height: 100%; object-fit: contain; transition: transform .15s; }
+  .img-card .thumb:hover img { transform: scale(1.04); }
+
+  /* Lightbox (full-size image viewer) */
+  .lightbox { position: fixed; inset: 0; z-index: 100; background: rgba(20,21,24,.88); display: flex; align-items: center; justify-content: center; animation: calloutIn .15s ease-out; }
+  .lb-img { max-width: 90vw; max-height: 86vh; object-fit: contain; border-radius: 6px; background: #fff; box-shadow: 0 16px 60px rgba(0,0,0,.55); cursor: default; }
+  .lb-btn {
+    position: fixed; border: none; background: rgba(255,255,255,.13); color: #fff; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; transition: background .12s; line-height: 1;
+  }
+  .lb-btn:hover { background: rgba(255,255,255,.26); }
+  .lb-nav { top: 50%; transform: translateY(-50%); width: 52px; height: 52px; border-radius: 50%; font-size: 30px; font-weight: 700; }
+  .lb-prev { left: 18px; } .lb-next { right: 18px; }
+  .lb-close { top: 16px; right: 18px; width: 40px; height: 40px; border-radius: 50%; font-size: 24px; }
+  .lb-caption { position: fixed; bottom: 18px; left: 0; right: 0; text-align: center; color: #fff; font-size: 13px; font-weight: 600; opacity: .92; pointer-events: none; }
+  .lb-caption .lb-counter { opacity: .7; }
   .img-card .img-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--hairline); }
   .img-card .img-name { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -1231,6 +1246,7 @@ function renderPills() {
 
 function renderPanel() {
   closeCallout(); // any open occurrence popover belongs to the previous view
+  closeLightbox();
   const body = $('#panelBody'); body.innerHTML = '';
 
   const anything = CATEGORIES.some(c => countOf(c.key) > 0);
@@ -1376,11 +1392,12 @@ function renderRaw(body, text) {
 
 function renderGallery(body, images) {
   const grid = el('div', { className: 'gallery' });
-  images.forEach((img) => {
+  images.forEach((img, idx) => {
     const url = URL.createObjectURL(img.blob);
     const card = el('div', { className: 'img-card' });
-    const thumb = el('div', { className: 'thumb' });
+    const thumb = el('div', { className: 'thumb', title: 'Click to view full size' });
     thumb.append(el('img', { src: url, alt: img.name, loading: 'lazy' }));
+    thumb.addEventListener('click', () => openLightbox(images, idx));
     const foot = el('div', { className: 'img-foot' });
     // Caption = where the image was found (page + position %); filename on hover.
     const loc = pageLocation(img.source, img.page);
@@ -1391,6 +1408,57 @@ function renderGallery(body, images) {
     grid.append(card);
   });
   body.append(grid);
+}
+
+/* Full-size image viewer with prev/next + keyboard nav (←/→/Esc). */
+let activeLightbox = null, lbKeyHandler = null;
+function closeLightbox() {
+  if (!activeLightbox) return;
+  document.removeEventListener('keydown', lbKeyHandler);
+  if (activeLightbox.url) URL.revokeObjectURL(activeLightbox.url);
+  activeLightbox.overlay.remove();
+  activeLightbox = null; lbKeyHandler = null;
+}
+function openLightbox(images, startIdx) {
+  closeLightbox();
+  let idx = startIdx;
+  const overlay  = el('div', { className: 'lightbox' });
+  const img      = el('img', { className: 'lb-img', alt: '' });
+  const caption  = el('div', { className: 'lb-caption' });
+  const prev     = el('button', { className: 'lb-btn lb-nav lb-prev',  textContent: '‹', title: 'Previous (←)' });
+  const next     = el('button', { className: 'lb-btn lb-nav lb-next',  textContent: '›', title: 'Next (→)' });
+  const close    = el('button', { className: 'lb-btn lb-close',        textContent: '×', title: 'Close (Esc)' });
+
+  const show = (i) => {
+    idx = (i + images.length) % images.length;
+    const im = images[idx];
+    if (activeLightbox.url) URL.revokeObjectURL(activeLightbox.url);
+    activeLightbox.url = URL.createObjectURL(im.blob);
+    img.src = activeLightbox.url;
+    const loc = pageLocation(im.source, im.page);
+    caption.innerHTML = '';
+    if (images.length > 1) caption.append(el('span', { className: 'lb-counter', textContent: (idx + 1) + ' / ' + images.length + '   ·   ' }));
+    caption.append(document.createTextNode(loc || im.name));
+  };
+
+  prev.onclick  = (e) => { e.stopPropagation(); show(idx - 1); };
+  next.onclick  = (e) => { e.stopPropagation(); show(idx + 1); };
+  close.onclick = (e) => { e.stopPropagation(); closeLightbox(); };
+  img.onclick   = (e) => e.stopPropagation();              // clicks on the image don't close
+  overlay.onclick = () => closeLightbox();                 // clicking the backdrop does
+  if (images.length < 2) { prev.style.display = next.style.display = 'none'; }
+
+  lbKeyHandler = (e) => {
+    if (e.key === 'Escape') closeLightbox();
+    else if (e.key === 'ArrowLeft')  show(idx - 1);
+    else if (e.key === 'ArrowRight') show(idx + 1);
+  };
+  document.addEventListener('keydown', lbKeyHandler);
+
+  overlay.append(img, prev, next, close, caption);
+  document.body.append(overlay);
+  activeLightbox = { overlay, url: null };
+  show(idx);
 }
 
 function renderTables(body, tables) {
