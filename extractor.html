@@ -1236,7 +1236,7 @@ async function aiExtractPdf(file, method, onStatus) {
 // Run AI extraction across all PDF sources in the pool.
 async function runAiExtraction(method, onStatus) {
   const pdfs = state.sources.filter(s => s.status === 'ok' && s.file && /\.pdf$/i.test(s.name));
-  if (!pdfs.length) throw new Error('AI table extraction needs a PDF — drop one first.');
+  if (!pdfs.length) throw new Error('Table Transformer extraction needs a PDF — drop one first.');
   const all = [];
   for (const s of pdfs) {
     const ts = await aiExtractPdf(s.file, method, onStatus);
@@ -1257,10 +1257,11 @@ async function startAiExtraction(method) {
     const tables = await runAiExtraction(method, onStatus);
     state.aiTables = tables;
     state.tableSel = 0;
-    if (!tables.length) toast('The AI models ran but found no tables on these pages.', 'warn', 'Smart extraction');
-    else toast(`AI extracted ${tables.length} table${tables.length === 1 ? '' : 's'}.`, 'ok');
+    const engine = method === 'ocr' ? 'Table Transformer + Tesseract OCR' : 'Table Transformer';
+    if (!tables.length) toast('The model ran but found no tables on these pages.', 'warn', engine);
+    else toast(`${engine} extracted ${tables.length} table${tables.length === 1 ? '' : 's'}.`, 'ok');
   } catch (e) {
-    toast(e.message || 'The model failed to load or run.', 'error', 'Smart extraction failed', 9000);
+    toast(e.message || 'The model failed to load or run.', 'error', 'Table extraction failed', 9000);
   } finally {
     state.aiBusy = false;
     renderPills(); renderPanel();
@@ -1750,13 +1751,13 @@ function buildOutputControls(cat) {
   }
 
   if (cat.type === 'tables') {
-    // --- Smart (AI) extraction: pick a method, then run on demand ---
-    const sel = el('select', { className: 'fmt', title: 'Which AI method to use' });
-    sel.append(el('option', { value: 'text', textContent: 'AI · Text PDF' }));
-    sel.append(el('option', { value: 'ocr', textContent: 'AI · Scanned (OCR)' }));
+    // --- Alternative table extraction: pick an engine, then run on demand ---
+    const sel = el('select', { className: 'fmt', title: 'Which extraction engine to run' });
+    sel.append(el('option', { value: 'text', textContent: 'Table Transformer (text layer)' }));
+    sel.append(el('option', { value: 'ocr', textContent: 'Table Transformer + Tesseract OCR' }));
     actions.append(sel);
     actions.append(el('button', {
-      className: 'btn btn-secondary sm', textContent: state.aiBusy ? 'Working…' : '✨ Smart extract',
+      className: 'btn btn-secondary sm', textContent: state.aiBusy ? 'Working…' : 'Extract tables',
       disabled: state.aiBusy,
       onclick: () => startAiExtraction(sel.value),
     }));
